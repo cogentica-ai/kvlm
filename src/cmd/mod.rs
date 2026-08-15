@@ -3,6 +3,7 @@
 #![allow(non_upper_case_globals)]
 
 pub mod apply;
+pub mod doctor;
 pub mod down;
 pub mod model;
 pub mod profile;
@@ -19,6 +20,7 @@ pub mod up;
 goish::import! {
     crate::cmd::up as __init_up,
     crate::cmd::apply as __init_apply,
+    crate::cmd::doctor as __init_doctor,
     crate::cmd::down as __init_down,
     crate::cmd::model as __init_model,
     crate::cmd::profile as __init_profile,

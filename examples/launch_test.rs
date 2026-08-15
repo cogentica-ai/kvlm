@@ -64,7 +64,7 @@ fn test_serve_line_tensor_parallel(t: &mut testing::T) {
 }
 
 fn test_setup_script(t: &mut testing::T) {
-    let script = launch::Script(string("exec vllm serve m"), string("0.26.0"), true);
+    let script = launch::Script(string("exec vllm serve m"), string("0.26.0"), true, false);
     for want in [
         "pip install -q vllm==0.26.0",
         "cuda-keyring_1.1-1_all.deb",
@@ -98,7 +98,7 @@ fn test_production_mode(t: &mut testing::T) {
     if strings::Contains(line.clone(), "--profiler-config") {
         t.Fatal(string("production serve line must not expose profiling endpoints"));
     }
-    let script = launch::Script(line, string("0.26.0"), false);
+    let script = launch::Script(line, string("0.26.0"), false, false);
     for absent in ["nsys", "nsight-systems", "--cuda-graph-trace"].iter() {
         if strings::Contains(script.clone(), string(*absent)) {
             t.Fatal(fmt::Sprintf!("production script must not contain %q", string(*absent)));
@@ -173,6 +173,7 @@ fn test_restart_script(t: &mut testing::T) {
     for want in [
         "pkill -f '[v]llm serve'",
         "nsys shutdown --session=kvlm",
+        "nsys sessions list 2>/dev/null | grep -q kvlm || break",
         "cat > /workspace/serve-kvlm.sh <<'KVLMEOF'",
         "--cuda-graph-trace=node",
         "> /workspace/vllm.log 2>&1 &",

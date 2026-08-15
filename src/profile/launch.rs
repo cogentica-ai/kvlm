@@ -25,6 +25,7 @@ pub const ProfilerConfigValue: &str = "{\"profiler\": \"torch\", \"torch_profile
 pub const ServeScriptPath: &str = "/workspace/serve-kvlm.sh";
 pub const SetupScriptPath: &str = "/workspace/kvlm-setup.sh";
 pub const ServerLogPath: &str = "/workspace/vllm.log";
+pub const RestartLogPath: &str = "/workspace/restart.log";
 
 fn shQuote(v: string) -> string {
     if strings::Contains(v.clone(), " ") || strings::Contains(v.clone(), "\"") || strings::Contains(v.clone(), "{") {
@@ -98,6 +99,36 @@ pub fn WithFlag(spec: &model::ServeSpec, name: string, value: string) -> model::
     out
 }
 
+// writeServeScript writes the serve-kvlm.sh heredoc: HF cache on the
+// volume, and the pip nvidia lib dirs on the loader path (torchcodec
+// and friends dlopen CUDA libs that live in site-packages, measured
+// failing without this on a fresh pod).
+fn writeServeScript(b: &mut strings::Builder, serveLine: string) {
+    let _ = b.WriteString(fmt::Sprintf!(
+        "cat > %s <<'KVLMEOF'\n#!/bin/bash\nexport HF_HOME=/workspace/hf\nexport LD_LIBRARY_PATH=$(ls -d /usr/local/lib/python*/dist-packages/nvidia/*/lib 2>/dev/null | tr '\\n' ':')$LD_LIBRARY_PATH\n%s\nKVLMEOF\n",
+        string(ServeScriptPath),
+        serveLine
+    ));
+    let _ = b.WriteString(fmt::Sprintf!("chmod +x %s\n", string(ServeScriptPath)));
+}
+
+// writePreflight writes the import check that runs before the server
+// starts: seconds to fail with the real traceback, instead of a dead
+// server discovered by a 30-minute wait. Vision models add torchcodec
+// (its native lib needs ffmpeg and the nvidia lib path).
+fn writePreflight(b: &mut strings::Builder, vision: bool) {
+    let mut imports = string("torch, vllm");
+    if vision {
+        imports = string("torch, vllm, torchcodec");
+    }
+    let _ = b.WriteString("NVLIBS=$(ls -d /usr/local/lib/python*/dist-packages/nvidia/*/lib 2>/dev/null | tr '\\n' ':')\n");
+    let _ = b.WriteString(fmt::Sprintf!(
+        "if ! LD_LIBRARY_PATH=$NVLIBS$LD_LIBRARY_PATH python3 -c 'import %s' 2>&1; then echo PREFLIGHT_FAILED; exit 1; fi\n",
+        imports
+    ));
+    let _ = b.WriteString("echo PREFLIGHT_OK\n");
+}
+
 // RestartScript composes the warm-restart script kvlm apply uploads:
 // stop the serving process, rewrite the serve script with the new
 // line, and relaunch it under a fresh nsys node-mode session. Weights
@@ -106,13 +137,18 @@ pub fn WithFlag(spec: &model::ServeSpec, name: string, value: string) -> model::
 pub fn RestartScript(serveLine: string) -> string {
     let (nsys, _) = profile::Find("nsys");
     let mut b = strings::Builder::new();
-    let _ = b.WriteString("#!/bin/bash\nset -x\nexec > /workspace/restart.log 2>&1\nexport HF_HOME=/workspace/hf\n\n");
+    let _ = b.WriteString(fmt::Sprintf!(
+        "#!/bin/bash\nset -x\nexec > %s 2>&1\nexport HF_HOME=/workspace/hf\n\n",
+        string(RestartLogPath)
+    ));
     // the [v] character class keeps pkill from matching this script
     let _ = b.WriteString("pkill -f '[v]llm serve' || true\nsleep 3\n");
-    let _ = b.WriteString("nsys shutdown --session=kvlm >/dev/null 2>&1 || true\n");
+    // the relaunch uses --session-new, which refuses a name that still
+    // exists; shut the old session down and verify it is really gone
+    // (a lingering session was a silent way for the relaunch to die)
+    let _ = b.WriteString("for i in 1 2 3 4 5; do\n  nsys shutdown --session=kvlm >/dev/null 2>&1 || true\n  nsys sessions list 2>/dev/null | grep -q kvlm || break\n  sleep 2\ndone\n");
     let _ = b.WriteString("mkdir -p /tmp/kvlm-profile/torch\n");
-    let _ = b.WriteString(fmt::Sprintf!("cat > %s <<'KVLMEOF'\n#!/bin/bash\nexport HF_HOME=/workspace/hf\n%s\nKVLMEOF\n", string(ServeScriptPath), serveLine));
-    let _ = b.WriteString(fmt::Sprintf!("chmod +x %s\n", string(ServeScriptPath)));
+    writeServeScript(&mut b, serveLine);
     let vars = slice!([]profile::Var{
         profile::Var{ Key: string("session"), Value: string("kvlm"), ..Default::default() },
         profile::Var{ Key: string("serve"), Value: string(ServeScriptPath), ..Default::default() },
@@ -130,11 +166,16 @@ pub fn RestartScript(serveLine: string) -> string {
 // steps and the node-mode launch from the registry's Setup contract
 // (measured cost: about 4x cudaGraphLaunch overhead, a few percent of
 // a decode step, which is why production mode launches bare).
-pub fn Script(serveLine: string, vllmVersion: string, profiled: bool) -> string {
+pub fn Script(serveLine: string, vllmVersion: string, profiled: bool, vision: bool) -> string {
     let (nsys, _) = profile::Find("nsys");
     let mut b = strings::Builder::new();
     let _ = b.WriteString("#!/bin/bash\nset -x\nexec > /workspace/setup.log 2>&1\nexport DEBIAN_FRONTEND=noninteractive\nexport HF_HOME=/workspace/hf\n\n");
     let _ = b.WriteString(fmt::Sprintf!("pip install -q vllm==%s 2>&1 | tail -2\n\n", vllmVersion));
+    if vision {
+        // vision models import torchcodec, whose native lib dlopens
+        // ffmpeg (measured failing without it on a fresh pod)
+        let _ = b.WriteString("apt-get install -y -qq ffmpeg >/dev/null 2>&1\n");
+    }
     if profiled {
         for (_, c) in range!(nsys.Install.clone()) {
             let _ = b.WriteString(profile::RenderCmd(&c));
@@ -142,8 +183,8 @@ pub fn Script(serveLine: string, vllmVersion: string, profiled: bool) -> string 
         }
     }
     let _ = b.WriteString("\nmkdir -p /tmp/kvlm-profile/torch\n");
-    let _ = b.WriteString(fmt::Sprintf!("cat > %s <<'KVLMEOF'\n#!/bin/bash\nexport HF_HOME=/workspace/hf\n%s\nKVLMEOF\n", string(ServeScriptPath), serveLine));
-    let _ = b.WriteString(fmt::Sprintf!("chmod +x %s\n", string(ServeScriptPath)));
+    writeServeScript(&mut b, serveLine);
+    writePreflight(&mut b, vision);
     let _ = b.WriteString("echo SETUP_DONE\n");
     if profiled {
         // the registry's launch contract, with the placeholders bound

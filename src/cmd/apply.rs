@@ -15,7 +15,7 @@ use goish::time;
 use goish::gomap::map;
 use goish::goslice::slice;
 use goish::errors::error;
-use goish::{append, make, nil, range};
+use goish::{append, int, make, nil, range};
 
 use spf13_cobra as cobra;
 
@@ -105,34 +105,100 @@ fn serveLineFor(t: &state::Target, delta: &map<string, string>) -> (string, erro
     (profile::launch::ServeLine(&spec, t.GPUCount, true), nil.into())
 }
 
-// waitServe polls the restarted server until it answers, watching the
-// log for engine-init failures. Weights are cached, so the wait is
-// short compared to a fresh launch.
+// tailOf fetches the last n lines of a remote file for failure
+// evidence, so an error names its cause instead of pointing at a
+// command the user has to run next.
+fn tailOf(tr: &profcmd::transport, path: string, n: int) -> string {
+    let (out, err) = tr.exec(fmt::Sprintf!("tail -%d %s 2>/dev/null", n, path));
+    if err != nil {
+        return string("");
+    }
+    strings::TrimSpace(out)
+}
+
+// lastLogLine is the server log's most recent non-empty line, tail
+// truncated, for progress reporting during the engine re-init.
+fn lastLogLine(tr: &profcmd::transport) -> string {
+    let (out, err) = tr.exec(fmt::Sprintf!(
+        "tail -c 4000 %s 2>/dev/null | grep -a . | tail -1",
+        string(profile::launch::ServerLogPath)
+    ));
+    if err != nil {
+        return string("");
+    }
+    let line = strings::TrimSpace(out);
+    if line.Len() > 140 {
+        return line.slice(line.Len() - 140, line.Len());
+    }
+    line
+}
+
+// waitServe polls the restarted server until it answers. Weights are
+// cached, but a flag change makes the engine re-profile memory and
+// recapture CUDA graphs, so the honest budget is minutes (a 400 s
+// cap was measured expiring on a healthy restart). While waiting it
+// distinguishes the ways a restart actually fails: engine init
+// failure, the process dying (a lingering nsys session was one
+// measured cause), and the pod itself going away.
 fn waitServe(tr: &profcmd::transport) -> error {
+    let mut sshFails = 0;
     let mut i = 0;
-    while i < 40 {
+    while i < 90 {
         time::Sleep(time::Seconds(10));
-        let (code, _) = tr.exec(string(
+        let (code, err) = tr.exec(string(
             "curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/v1/models 2>/dev/null",
         ));
+        if err != nil {
+            // a streak means the pod may be gone — but a ~2 min sshd
+            // bounce on a healthy pod was also measured, so require
+            // several minutes of silence before calling it
+            sshFails += 1;
+            if sshFails >= 18 {
+                return fmt::Errorf!(
+                    "ssh to the pod stopped answering for minutes during the restart; the pod may have been terminated externally. kvlm ps reconciles against the platform; if it still shows RUNNING, re-run the same kvlm apply"
+                );
+            }
+            i += 1;
+            continue;
+        }
+        sshFails = 0;
         if strings::TrimSpace(code) == "200" {
             return nil.into();
         }
-        let (fails, err) = tr.exec(fmt::Sprintf!(
-            "grep -c 'Engine core initialization failed' %s 2>/dev/null; true",
-            string(profile::launch::ServerLogPath)
+        let (probe, err) = tr.exec(fmt::Sprintf!(
+            "grep -q 'Engine core initialization failed' %s 2>/dev/null && echo ENGINE_FAILED; grep -q RESTARTED %s 2>/dev/null && ! pgrep -f '[v]llm serve' >/dev/null && echo SERVER_DEAD; true",
+            string(profile::launch::ServerLogPath),
+            string(profile::launch::RestartLogPath)
         ));
         if err == nil {
-            let f = strings::TrimSpace(fails);
-            if f != "" && f != "0" {
+            if strings::Contains(probe.clone(), "ENGINE_FAILED") {
                 return fmt::Errorf!(
-                    "the restarted server failed engine init; kvlm logs shows the cause. Roll the flag back with kvlm apply --reset"
+                    "the restarted server failed engine init:\n%s\nRoll the flag back with kvlm apply --reset",
+                    tailOf(tr, string(profile::launch::ServerLogPath), 8)
                 );
+            }
+            // i >= 2 gives the relaunch a grace window: right after
+            // pkill there is legitimately no serve process yet
+            if i >= 2 && strings::Contains(probe, "SERVER_DEAD") {
+                return fmt::Errorf!(
+                    "the server process exited during the restart.\nserver log:\n%s\nrestart script:\n%s\nRetry the same kvlm apply, or roll back with kvlm apply --reset",
+                    tailOf(tr, string(profile::launch::ServerLogPath), 8),
+                    tailOf(tr, string(profile::launch::RestartLogPath), 5)
+                );
+            }
+        }
+        if i > 0 && i % 6 == 0 {
+            let line = lastLogLine(tr);
+            if line != "" {
+                fmt::Printf!("  still starting (%d s): %s\n", i * 10, line);
             }
         }
         i += 1;
     }
-    fmt::Errorf!("server not answering 400 s after the restart; kvlm logs shows where it is stuck")
+    fmt::Errorf!(
+        "server not answering 15 minutes after the restart:\n%s\nIf it comes up later, re-run the same kvlm apply so the recorded flag state matches the server",
+        tailOf(tr, string(profile::launch::ServerLogPath), 8)
+    )
 }
 
 // stagePending records the delta for the next collected run's chain.
@@ -172,8 +238,9 @@ fn applyCmd() -> cobra::Command {
             "Restart the server kvlm launched, with vLLM flags changed on top\n\
              of the catalog recipe: kvlm apply max-num-seqs=64. The delta is\n\
              recorded so the next kvlm profile run chains to its parent with\n\
-             the change named. Weights stay cached on the pod, so the cycle\n\
-             is about 90 seconds.\n\
+             the change named. Weights stay cached on the pod; the engine\n\
+             still re-profiles memory and recaptures CUDA graphs, so the\n\
+             cycle is a few minutes.\n\
              \n\
              Only a server kvlm launched in profile mode is ever touched;\n\
              production pods and foreign servers are refused. --reset drops\n\
@@ -247,7 +314,7 @@ fn applyCmd() -> cobra::Command {
                 if err != nil {
                     return fmt::Errorf!("upload restart script to %s: %v", t.SSH.clone(), err);
                 }
-                fmt::Println!("restarting under the profilers (weights are cached; expect about 90 s)...");
+                fmt::Println!("restarting under the profilers (weights are cached, but the engine re-profiles memory and recaptures CUDA graphs; expect a few minutes)...");
                 let err = waitServe(&tr);
                 if err != nil {
                     return err;

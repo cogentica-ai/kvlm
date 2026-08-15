@@ -8,7 +8,7 @@
 
 # collected profiling runs: measured data, hundreds of MB of captures;
 # they travel as .kvlm archives, not through git
-/profile-output
+/profile-output*
 /profile-output.bak*
 *.kvlm
 /qwen-code-export-*.md

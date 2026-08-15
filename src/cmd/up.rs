@@ -9,6 +9,7 @@
 
 use goish::encoding::base64;
 use goish::fmt;
+use goish::os;
 use goish::string;
 use goish::strings;
 use goish::time;
@@ -28,9 +29,9 @@ use crate::state;
 
 // launchServer installs and launches vLLM on the pod, then waits for
 // the endpoint (model download plus load; several minutes).
-fn launchServer(dest: string, identity: string, spec: &model::ServeSpec, gpuCount: int, vllmVersion: string, profiled: bool) -> error {
+fn launchServer(dest: string, identity: string, spec: &model::ServeSpec, gpuCount: int, vllmVersion: string, profiled: bool, vision: bool) -> error {
     let serveLine = profile::launch::ServeLine(spec, gpuCount, profiled);
-    let script = profile::launch::Script(serveLine, vllmVersion.clone(), profiled);
+    let script = profile::launch::Script(serveLine, vllmVersion.clone(), profiled, vision);
     let tr = profcmd::sshTransport(dest.clone(), identity);
 
     fmt::Printf!("kvlm: waiting for sshd on %s...\n", dest.clone());
@@ -53,35 +54,63 @@ fn launchServer(dest: string, identity: string, spec: &model::ServeSpec, gpuCoun
         );
     }
 
-    let enc = base64::StdEncoding.EncodeToString(script.as_bytes());
-    let (_, err) = tr.exec(fmt::Sprintf!(
-        "echo %s | base64 -d > %s && chmod +x %s && nohup %s >/dev/null 2>&1 & echo launched",
-        enc,
-        string(profile::launch::SetupScriptPath),
-        string(profile::launch::SetupScriptPath),
-        string(profile::launch::SetupScriptPath)
+    // an interrupted waiter (ssh blip, killed process) leaves a launch
+    // already running on the pod; rerunning the setup script over it
+    // would collide with the live nsys session and serve process, so
+    // detect that case and just wait for the launch that exists
+    let (probe, perr) = tr.exec(string(
+        "grep -q LAUNCHED /workspace/setup.log 2>/dev/null && pgrep -f '[v]llm serve' >/dev/null && echo ALREADY_LAUNCHED; true",
     ));
-    if err != nil {
-        return fmt::Errorf!("upload launch script: %v", err);
-    }
-    if profiled {
-        fmt::Printf!(
-            "kvlm: installing vLLM %s and launching %s under the profilers (model load takes a few minutes)...\n",
-            vllmVersion,
-            spec.Model.clone()
-        );
+    if perr == nil && strings::Contains(probe, "ALREADY_LAUNCHED") {
+        fmt::Printf!("kvlm: a launch is already running on the pod; waiting for it instead of relaunching\n");
     } else {
-        fmt::Printf!(
-            "kvlm: installing vLLM %s and launching %s for production serving, no profiler overhead (model load takes a few minutes)...\n",
-            vllmVersion,
-            spec.Model.clone()
-        );
+        let enc = base64::StdEncoding.EncodeToString(script.as_bytes());
+        let (_, err) = tr.exec(fmt::Sprintf!(
+            "echo %s | base64 -d > %s && chmod +x %s && nohup %s >/dev/null 2>&1 & echo launched",
+            enc,
+            string(profile::launch::SetupScriptPath),
+            string(profile::launch::SetupScriptPath),
+            string(profile::launch::SetupScriptPath)
+        ));
+        if err != nil {
+            return fmt::Errorf!("upload launch script: %v", err);
+        }
+        if profiled {
+            fmt::Printf!(
+                "kvlm: installing vLLM %s and launching %s under the profilers (model load takes a few minutes)...\n",
+                vllmVersion,
+                spec.Model.clone()
+            );
+        } else {
+            fmt::Printf!(
+                "kvlm: installing vLLM %s and launching %s for production serving, no profiler overhead (model load takes a few minutes)...\n",
+                vllmVersion,
+                spec.Model.clone()
+            );
+        }
     }
 
+    let mut sshFails: int = 0;
     let mut i: int = 0;
     while i < 60 {
         time::Sleep(time::Seconds(30));
-        let (code, _) = tr.exec(string("curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/v1/models 2>/dev/null"));
+        let (code, cerr) = tr.exec(string("curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/v1/models 2>/dev/null"));
+        if cerr != nil {
+            // a streak means the pod may be gone (external termination
+            // mid-setup was measured on RunPod) — but so was a ~2 min
+            // sshd bounce on a healthy pod, so the streak must span
+            // about 5 minutes before calling it
+            sshFails += 1;
+            if sshFails >= 10 {
+                return fmt::Errorf!(
+                    "ssh to %s stopped answering for 5 minutes during the launch; the pod may have been terminated externally. kvlm ps reconciles against the platform; if it still shows RUNNING, kvlm up --resume continues the launch",
+                    dest
+                );
+            }
+            i += 1;
+            continue;
+        }
+        sshFails = 0;
         if strings::TrimSpace(code.clone()) == "200" {
             let _ = profiled;
             fmt::Printf!("kvlm: vLLM is serving; collect with: kvlm profile run\n");
@@ -99,6 +128,45 @@ fn launchServer(dest: string, identity: string, spec: &model::ServeSpec, gpuCoun
                 );
             }
         }
+        // fail the moment the launch dies instead of waiting out the
+        // clock: a preflight import failure names itself in seconds,
+        // and a served process that exited will never answer
+        let (probe, err) = tr.exec(string(
+            "grep -q PREFLIGHT_FAILED /workspace/setup.log 2>/dev/null && echo PREFLIGHT_FAILED; grep -q LAUNCHED /workspace/setup.log 2>/dev/null && ! pgrep -f '[v]llm serve' >/dev/null && echo SERVER_DEAD; true",
+        ));
+        if err == nil {
+            if strings::Contains(probe.clone(), "PREFLIGHT_FAILED") {
+                let (tail, _) = tr.exec(string("tail -5 /workspace/setup.log"));
+                return fmt::Errorf!(
+                    "launch preflight failed on the pod (an import the model needs does not work there):\n%s\nThe pod is still running and billing: kvlm down stops it",
+                    strings::TrimSpace(tail)
+                );
+            }
+            if strings::Contains(probe, "SERVER_DEAD") {
+                let (tail, _) = tr.exec(fmt::Sprintf!("tail -8 %s", string(profile::launch::ServerLogPath)));
+                return fmt::Errorf!(
+                    "the server process exited during startup:\n%s\nThe pod is still running and billing: kvlm down stops it, kvlm up --resume retries the launch",
+                    strings::TrimSpace(tail)
+                );
+            }
+        }
+        // a progress line every 2 minutes: minutes of silence during
+        // the download/load read as a hang even when nothing is wrong
+        if i > 0 && i % 4 == 0 {
+            let (out, err) = tr.exec(fmt::Sprintf!(
+                "tail -c 4000 %s 2>/dev/null | grep -a . | tail -1",
+                string(profile::launch::ServerLogPath)
+            ));
+            if err == nil {
+                let mut line = strings::TrimSpace(out);
+                if line.Len() > 140 {
+                    line = line.slice(line.Len() - 140, line.Len());
+                }
+                if line != "" {
+                    fmt::Printf!("kvlm: still starting (%d s): %s\n", i * 30, line);
+                }
+            }
+        }
         i += 1;
     }
     fmt::Errorf!("server not answering after 30 minutes; check /workspace/setup.log and %s on the pod", string(profile::launch::ServerLogPath))
@@ -111,6 +179,32 @@ fn variantGPURef(v: &model::Variant) -> string {
         return v.ProdGPU.clone();
     }
     v.MinGPU.clone()
+}
+
+// launchKeyPreflight fails fast when a profile-mode launch has no ssh
+// private key to authenticate with: the pod would deploy and bill,
+// and the ssh wait could never succeed. Resolution mirrors the
+// transport's: --identity, then ~/.runpod/id_ed25519, then
+// ~/.ssh/id_ed25519.
+fn launchKeyPreflight(identity: string) -> error {
+    if identity != "" {
+        let (_, err) = os::ReadFile(identity.clone());
+        if err != nil {
+            return fmt::Errorf!("ssh identity %s does not exist; the pod would deploy but the launch could never connect", identity);
+        }
+        return nil.into();
+    }
+    let (home, err) = os::UserHomeDir();
+    if err != nil {
+        return nil.into();
+    }
+    for rel in ["/.runpod/id_ed25519", "/.ssh/id_ed25519"].iter() {
+        let (_, err) = os::ReadFile((home.clone()) + (string(*rel)));
+        if err == nil {
+            return nil.into();
+        }
+    }
+    fmt::Errorf!("no ssh private key found (looked for ~/.runpod/id_ed25519 and ~/.ssh/id_ed25519); a profile-mode pod would deploy and bill, but the launch could never connect. Pass --identity <keyfile> or create a key pair first")
 }
 
 // upCmd represents the up command. (Go: var upCmd = &cobra.Command{...})
@@ -145,6 +239,7 @@ fn upCmd() -> cobra::Command {
                 let mut spec: model::ServeSpec = Default::default();
                 let mut variant: model::Variant = Default::default();
                 let mut haveSpec = false;
+                let mut visionModel = false;
                 let (quant, _) = cmd.Flags().GetString("quantization");
                 if args.Len() > 0 {
                     modelName = args[0usize].clone();
@@ -152,6 +247,7 @@ fn upCmd() -> cobra::Command {
                     if !ok {
                         return fmt::Errorf!("unknown model %q (see 'kvlm model ls')", modelName);
                     }
+                    visionModel = m.Vision;
                     // without --quantization, serve the variant that
                     // needs the fewest GPUs (catalog order breaks ties);
                     // the alternatives are named so the choice is visible
@@ -201,6 +297,41 @@ fn upCmd() -> cobra::Command {
                             strings::Join(others, ", ")
                         );
                     }
+                }
+
+                // --resume: the pod exists (an interrupted launch, a
+                // dead waiter); skip the deploy and run the launch
+                // phase against the recorded target
+                let (resume, _) = cmd.Flags().GetBool("resume");
+                if resume {
+                    let (t, ok) = state::Current();
+                    if !ok || t.SSH == "" {
+                        return fmt::Errorf!("nothing to resume: no recorded pod with ssh (kvlm ps lists live pods)");
+                    }
+                    if !haveSpec {
+                        return fmt::Errorf!("--resume needs the model named, to know what to launch");
+                    }
+                    let (identity, _) = cmd.Flags().GetString("identity");
+                    let err = launchKeyPreflight(identity.clone());
+                    if err != nil {
+                        return err;
+                    }
+                    let (vllmVersion, _) = cmd.Flags().GetString("vllm-version");
+                    let mut n = t.GPUCount;
+                    if n < 1 {
+                        n = 1;
+                    }
+                    fmt::Printf!("kvlm: resuming the launch on pod %s (%s)\n", t.Pod.clone(), t.SSH.clone());
+                    let err = launchServer(t.SSH.clone(), identity, &spec, n, vllmVersion, true, visionModel);
+                    if err != nil {
+                        return err;
+                    }
+                    let (mut t2, ok) = state::Current();
+                    if ok {
+                        t2.ServerLog = string(profile::launch::ServerLogPath);
+                        state::Update(&t2);
+                    }
+                    return nil.into();
                 }
 
                 let (d, creds, err) = driver::FromCommand(cmd);
@@ -294,6 +425,13 @@ fn upCmd() -> cobra::Command {
                     return nil.into();
                 }
 
+                if !production {
+                    let (identity, _) = cmd.Flags().GetString("identity");
+                    let err = launchKeyPreflight(identity);
+                    if err != nil {
+                        return err;
+                    }
+                }
                 let (dest, err) = d.unwrap().Up(&creds, &opts);
                 if err != nil {
                     return err;
@@ -302,7 +440,7 @@ fn upCmd() -> cobra::Command {
                     return nil.into();
                 }
                 let (identity, _) = cmd.Flags().GetString("identity");
-                let err = launchServer(dest, identity, &spec, gpuCount, vllmVersion, true);
+                let err = launchServer(dest, identity, &spec, gpuCount, vllmVersion, true, visionModel);
                 if err != nil {
                     return err;
                 }
@@ -334,6 +472,7 @@ fn init() {
     let _ = c.Flags().String_flag(string("quantization"), string(""), string("weight format to serve (fp8, bf16, ...); default: the first variant with a recipe"));
     let _ = c.Flags().String_flag(string("volume"), string(""), string("shared network volume id: model weights and HF cache persist and are shared across pods"));
     let _ = c.Flags().Bool_flag(string("dry-run"), false, string("print the resolved shape and serve command without deploying"));
+    let _ = c.Flags().Bool_flag(string("resume"), false, string("skip the deploy and launch on the recorded pod (an interrupted profile-mode launch)"));
     let _ = c.Flags().String_flag(
         string("cuda"),
         string("13.0"),

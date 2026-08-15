@@ -436,7 +436,7 @@ static resolvedTools: Lazy<sync::Mutex<slice<string>>> = Lazy::new(|| {
 // cache. This is the ONLY correct presence check in this file: a live
 // LookPath lies after the first fork (the runtime's PATH goes empty),
 // reporting an installed tool as missing.
-fn toolAvailable(name: &'static str) -> bool {
+pub(crate) fn toolAvailable(name: &'static str) -> bool {
     strings::Contains(toolPath(string(name)), "/")
 }
 
@@ -1574,15 +1574,29 @@ impl transport {
         let mut args: goslice<string> = make!([]string, 0);
         args = append!(args.clone(), string("-o"));
         args = append!(args.clone(), string("BatchMode=yes"));
+        // the deploy injects the ~/.runpod pubkey (driver publicKey
+        // resolution), so with no explicit -I the matching private
+        // key is the default; plain ssh does not offer it on its own
+        let mut identity = self.identity.clone();
+        if identity == "" {
+            let (home, herr) = os::UserHomeDir();
+            if herr == nil {
+                let candidate = (home) + ("/.runpod/id_ed25519");
+                let (_, serr) = os::ReadFile(candidate.clone());
+                if serr == nil {
+                    identity = candidate;
+                }
+            }
+        }
         // ephemeral pods have fresh host keys every deploy; accept-new
         // records them on first contact and still fails hard if a
         // known host's key ever changes (strict checking would demand
         // a manual keyscan before every fresh pod)
         args = append!(args.clone(), string("-o"));
         args = append!(args.clone(), string("StrictHostKeyChecking=accept-new"));
-        if self.identity != "" {
+        if identity != "" {
             args = append!(args.clone(), string("-i"));
-            args = append!(args.clone(), self.identity.clone());
+            args = append!(args.clone(), identity);
         }
         args = append!(args.clone(), portFlag);
         args = append!(args.clone(), self.port.clone());
@@ -1645,7 +1659,7 @@ impl transport {
 
 // runCapture runs a local command, draining stdout here and stderr in
 // a goroutine (sequential drains deadlock past one pipe buffer).
-fn runCapture(name: string, args: goslice<string>) -> (string, string, error) {
+pub(crate) fn runCapture(name: string, args: goslice<string>) -> (string, string, error) {
     let mut command = exec::Command(name, args);
     let (mut stdoutReader, err) = command.StdoutPipe();
     if err != nil {
