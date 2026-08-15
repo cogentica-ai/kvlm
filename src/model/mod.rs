@@ -488,7 +488,7 @@ pub fn MemProfile(
     if !known || kvBytes <= 0 {
         return (0.0, 0.0, 0.0, 0, false);
     }
-    let cap = ((n * g.VRAMGB) as goish::float64);
+    let cap = (n * g.VRAMGB) as goish::float64;
     let loaded = v.WeightsGB + 2.0 * (n as goish::float64);
     let pool = cap * gibToGB * RecipeUtil(v) - loaded;
     if pool <= 0.0 {
@@ -1145,7 +1145,7 @@ pub fn VRAM<S1: Into<string>, S2: Into<string>>(
     let (kvBytes, clamped, _) = KVCacheBytes(&m, ctx);
     let perTok = m.KV.PerTokenBytes();
 
-    let mut archDesc = m.KV.Kind.clone();
+    let archDesc: string;
     let kind: &str = m.KV.Kind.as_ref();
     match kind {
         "gqa" => {

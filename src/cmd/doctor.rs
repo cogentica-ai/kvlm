@@ -15,7 +15,7 @@ use goish::string;
 use goish::strings;
 use goish::goslice::slice;
 use goish::errors::error;
-use goish::{append, int, make, nil, range};
+use goish::{append, int, make, nil};
 
 use spf13_cobra as cobra;
 

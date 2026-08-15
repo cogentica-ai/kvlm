@@ -58,7 +58,7 @@ pub static rootCmd: Lazy<sync::Mutex<cobra::Command>> = Lazy::new(|| {
         // Errors from RunE carry actionable messages; don't drown them
         // in a usage dump.
         SilenceUsage: true,
-        Version: string("0.1.0"),
+        Version: string("0.1.1"),
         ..Default::default()
     };
     // Go: rootCmd.PersistentFlags().StringVarP(&driver, "driver", "d", "", ...)

@@ -10,6 +10,8 @@
 // The output is an SVG flamegraph showing call stacks with widths
 // proportional to sample counts.
 #![allow(non_snake_case)]
+// lowercase type names are Go unexported-type names, kept verbatim
+#![allow(non_camel_case_types)]
 
 use goish::fmt;
 use goish::strings;
@@ -371,7 +373,7 @@ fn renderFrame(b: &mut strings::Builder, f: &Frame, xf: float64, depth: int, g: 
         showText = h >= ((g.fontSize + 4) as float64);
     }
     if showText {
-        let maxChars = (((w - 6.0) / 7.0) as int);
+        let maxChars = ((w - 6.0) / 7.0) as int;
         let display = truncateString(f.Name.clone(), maxChars);
         let mut textY = y + ((g.frameH as float64) - 4.0);
         if g.vertical {

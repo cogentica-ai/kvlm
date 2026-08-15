@@ -18,7 +18,7 @@ source = "git+https://github.com/cogentica-ai/goish?tag=v1.0.0-alpha.1#ff061453f
 
 [[package]]
 name = "kvlm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "goish",
  "spf13-cobra",

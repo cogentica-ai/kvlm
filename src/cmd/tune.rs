@@ -3,6 +3,8 @@
 // goal stands against the parent revision. The recommendation block
 // the collection prints is the next move; kvlm apply takes it.
 #![allow(non_snake_case)]
+// lowercase type names are Go unexported-type names, kept verbatim
+#![allow(non_camel_case_types)]
 
 use goish::encoding::json;
 use goish::fmt;
@@ -14,7 +16,7 @@ use goish::strings;
 use goish::gomap::map;
 use goish::goslice::slice;
 use goish::errors::error;
-use goish::{float64, int, nil, range};
+use goish::{float64, int, nil};
 
 use spf13_cobra as cobra;
 

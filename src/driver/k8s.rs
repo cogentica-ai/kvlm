@@ -7,7 +7,6 @@
 
 use goish::bytes;
 use goish::fmt;
-use goish::io;
 use goish::io::Reader as _;
 use goish::os;
 use goish::os::exec;

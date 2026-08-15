@@ -3,6 +3,8 @@
 // package — one source of truth: `profile show` prints exactly what
 // `profile run` executes. No prose lives in this file.
 #![allow(non_snake_case)]
+// lowercase type names are Go unexported-type names, kept verbatim
+#![allow(non_camel_case_types)]
 
 use goish::encoding::base64;
 use goish::encoding::json;
@@ -1155,7 +1157,7 @@ pub(crate) fn generateGraph(input: string, output: string, gpuName: string, note
                 }
                 let _ = b.WriteString("],\n");
 
-                let mut recommendText = string("");
+                let recommendText;
                 if hasUnit {
                     // fold the repeats into one averaged unit
                     let mut unitNodes: goslice<profile::graph::Node> = make!([]profile::graph::Node, 0);
@@ -2855,7 +2857,7 @@ fn runProfile(cmd: &mut cobra::Command, toolName: string) -> error {
     }
     for (_, c) in range!(analyze.clone()) {
         fmt::Printf!("$ %s\n", profile::RenderCmd(&c));
-        let mut argv = c.Argv.clone();
+        let argv = c.Argv.clone();
         let name = argv[0usize].clone();
         let rest = argv.slice(1, argv.Len());
         let (out, errOut, err) = runCaptureRetry(name, rest);
@@ -3072,7 +3074,7 @@ fn logFloatAfter(line: string, marker: &'static str) -> (float64, bool) {
     if idx < 0 {
         return (0.0, false);
     }
-    let mut i = idx + (string(marker)).Len();
+    let i = idx + (string(marker)).Len();
     let mut end = i;
     while end < line.Len() {
         let c = line[end as usize];
