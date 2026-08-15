@@ -14,7 +14,7 @@ on the [goish](https://github.com/cogentica-ai/goish) runtime and the
 ```
 kvlm up qwen3-32b --mode profile      # pod with vLLM under the profilers
 kvlm tune --goal total@32             # collect, verdict, recommendation
-kvlm apply max-num-seqs=64            # restart with the change, ~90 s
+kvlm apply max-num-seqs=64            # restart with the change, a few minutes
 kvlm tune                             # measure the change against its parent
 kvlm ship --up                        # deploy the flags the loop earned
 kvlm down
@@ -26,6 +26,39 @@ KV pressure probe, live metrics, the server's complete flag state, and
 a CUDA-graph analysis with per-node verdicts. Revisions chain: run2
 records that it is run1 plus `max-num-seqs=64`, and `kvlm run diff`
 shows flags first, then what they changed.
+
+## The catalog carries measurements, not guesses
+
+`kvlm model show qwen3.8-27b` prints what the catalog knows about
+Qwen 3.8 27B, the model the loop above was proven on:
+
+```
+Size:     27B (dense, multimodal)
+Context:  256K native, 976.6K max (YaRN)
+KV/seq:   8.7 GB at 256K (KDA, fp8 KV)
+
+VARIANT   WEIGHTS   PROD GPU   KV POOL   TOK/S   SEQS @ 32K/64K/128K/256K
+fp8       28 GB     1xH100     47 GB     79      32 / ~21 / ~10 / ~5
+bf16      55 GB     1xH100     20 GB     ~31     16 / ~9 / ~4 / -
+nvfp4     25 GB     1xB200     159 GB    ~120    32 / 32 / 32 / ~18
+```
+
+A tilde marks an estimate from the KV arithmetic. A bare number was
+measured: fp8 on a RunPod 1xH100 under vLLM 0.26.0 gives 79 tok/s
+single-stream decode and 1,442 tok/s aggregate at 32 streams, and the
+catalog says so with the date and conditions attached.
+
+That number is 40% above what a dense 27B's memory bandwidth predicts,
+because 48 of the model's 64 layers are linear attention and read no
+per-token KV. The catalog models that layout (`kvlm model vram`), so
+KV pool and resident-sequence counts follow the architecture instead
+of a dense approximation.
+
+Live loop result on this model: run1 measured 1,226 tok/s at 32
+streams and named `--max-num-seqs` as the bound; `kvlm apply
+max-num-seqs=64` and a second run cleared it, taking the pressure
+probe from 32 running with 15 queued to 48 running with none, and
+mean time-to-first-token from 1,255 ms to 221 ms.
 
 ## Commands
 
