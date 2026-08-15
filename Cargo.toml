@@ -20,7 +20,7 @@ path = "examples/kvlm_kv_test.rs"
 # rebuild without a push. Fresh clones fetch the pinned tags.
 [dependencies]
 goish = { git = "https://github.com/cogentica-ai/goish", tag = "v1.0.0-alpha.1" }
-spf13-cobra = { git = "https://github.com/cogentica-ai/ported-crates", tag = "v1.0.0-alpha.1" }
+spf13-cobra = { git = "https://github.com/cogentica-ai/ported-crates", tag = "v1.0.0-alpha.2" }
 
 # goish is freestanding (no_std, own _start, no unwinding) — panic must
 # abort in every profile.

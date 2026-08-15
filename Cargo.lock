@@ -5,6 +5,7 @@ version = 4
 [[package]]
 name = "goish"
 version = "0.1.0"
+source = "git+https://github.com/cogentica-ai/goish?tag=v1.0.0-alpha.1#ff061453ffd2533bb22ea68c8ccb176616aa4b5e"
 dependencies = [
  "goish-macros",
  "libm",
@@ -13,6 +14,7 @@ dependencies = [
 [[package]]
 name = "goish-macros"
 version = "0.1.0"
+source = "git+https://github.com/cogentica-ai/goish?tag=v1.0.0-alpha.1#ff061453ffd2533bb22ea68c8ccb176616aa4b5e"
 
 [[package]]
 name = "kvlm"
@@ -31,6 +33,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "spf13-cobra"
 version = "1.10.2"
+source = "git+https://github.com/cogentica-ai/ported-crates?tag=v1.0.0-alpha.2#a5ce7614a440015be704ecff9c12a5beca212bc1"
 dependencies = [
  "goish",
  "spf13-pflag",
@@ -39,6 +42,7 @@ dependencies = [
 [[package]]
 name = "spf13-pflag"
 version = "1.0.10"
+source = "git+https://github.com/cogentica-ai/ported-crates?tag=v1.0.0-alpha.2#a5ce7614a440015be704ecff9c12a5beca212bc1"
 dependencies = [
  "goish",
 ]
