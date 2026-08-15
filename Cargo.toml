@@ -1,0 +1,31 @@
+[package]
+name = "kvlm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "kvlm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kvlm"
+path = "src/main.rs"
+
+[[example]]
+name = "kvlm_kv_test"
+path = "examples/kvlm_kv_test.rs"
+
+# Hosted on the cogentica-ai org; local development redirects these to
+# the live checkouts via [patch] in ~/.cargo/config.toml, so edits
+# rebuild without a push. Fresh clones fetch the pinned tags.
+[dependencies]
+goish = { git = "https://github.com/cogentica-ai/goish", tag = "v1.0.0-alpha.1" }
+spf13-cobra = { git = "https://github.com/cogentica-ai/ported-crates", tag = "v1.0.0-alpha.1" }
+
+# goish is freestanding (no_std, own _start, no unwinding) — panic must
+# abort in every profile.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

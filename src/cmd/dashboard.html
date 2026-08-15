@@ -1,0 +1,1344 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kvlm performance dashboard</title>
+<style>
+  :root {
+    /* Grafana dark theme tokens (grafana/grafana palette.ts) */
+    --canvas: #111217; --panel: #181b1f; --panel-2: #22252b;
+    --border: rgba(204,204,220,.12); --border-2: rgba(204,204,220,.20);
+    --text: rgb(204,204,220); --dim: rgba(204,204,220,.65); --faint: rgba(204,204,220,.45);
+    --link: #6e9fff; --primary: #3d71d9;
+    /* classic visualization palette */
+    --green: #73bf69; --yellow: #fade2a; --blue: #5794f2;
+    --orange: #ff9830; --red: #f2495c; --purple: #b877d9;
+    /* semantic names the render code uses: one color per bottleneck class */
+    --accent: var(--green); --memory: var(--yellow); --load: var(--blue);
+    --latency: var(--purple); --bad: var(--red); --warn: var(--orange);
+    --bar1: var(--green); --bar2: var(--blue);
+    --inset: var(--canvas); --line: var(--border);
+    --font-ui: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --font-mono: "Roboto Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--canvas); color: var(--text); font: 13px/1.5 var(--font-ui); }
+  /* app shell: fixed explorer sidebar, scrolling content */
+  .shell { display: grid; grid-template-columns: 216px minmax(0, 1fr); min-height: 100vh; }
+  #sidebar { background: var(--panel); border-right: 1px solid var(--border); padding: 10px 0; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+  .content { min-width: 0; }
+  .side-h { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); padding: 12px 14px 4px; }
+  .side-item { display: flex; align-items: center; gap: 8px; width: 100%; background: none; border: none; color: var(--dim); font: inherit; font-size: 13px; padding: 6px 14px; cursor: pointer; text-align: left; border-left: 2px solid transparent; }
+  .side-item:hover { color: var(--text); background: rgba(204,204,220,.04); }
+  .side-item.on { color: var(--text); border-left-color: var(--primary); background: rgba(61,113,217,.10); }
+  .side-item .tag { margin-left: auto; font-size: 10px; color: var(--faint); font-family: var(--font-mono); }
+  .side-item.run { font-family: var(--font-mono); font-size: 12px; }
+  .side-act { color: var(--link); font-size: 11px; border: none; background: none; cursor: pointer; padding: 0; }
+  .side-note { color: var(--faint); font-size: 11px; padding: 2px 14px; }
+  .side-item .rchev { color: var(--faint); font-size: 9px; width: 10px; flex-shrink: 0; }
+  .side-file { display: block; padding: 2px 14px 2px 32px; font-size: 11px; font-family: var(--font-mono); color: var(--dim); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .side-file:hover { color: var(--link); background: rgba(204,204,220,.04); }
+  /* main view tabs: same brand-gradient underline, page level */
+  #viewtabs { padding: 6px 16px 0; }
+  #viewtabs .tabs { margin-bottom: 0; }
+  #viewtabs .tabs button { font-size: 14px; padding: 6px 2px 9px; }
+  #viewtabs .tabs .tag { font-size: 10px; color: var(--faint); margin-left: 5px; }
+  @media (max-width: 900px) { .shell { grid-template-columns: 1fr; } #sidebar { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--border); } }
+  /* top navigation: breadcrumb left, health and refresh right */
+  .topnav { display: flex; align-items: center; justify-content: space-between; gap: 12px; background: var(--panel); border-bottom: 1px solid var(--border); padding: 8px 16px; position: sticky; top: 0; z-index: 5; }
+  .crumb { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 14px; font-weight: 500; }
+  .crumb .app { color: var(--green); font-family: var(--font-mono); font-weight: 700; }
+  .crumb .sep { color: var(--faint); font-weight: 400; }
+  .navright { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+  .toolchip { border: 1px solid var(--border-2); border-radius: 2px; padding: 2px 8px; font-size: 12px; color: var(--dim); }
+  /* variable bar: run picker as dashboard variables, provenance as tags */
+  .subbar { display: flex; align-items: center; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; padding: 8px 16px 0; }
+  .prov { color: var(--dim); font-size: 12px; display: flex; flex-wrap: wrap; gap: 4px 6px; }
+  .spec { background: rgba(61,113,217,.15); color: var(--link); border-radius: 2px; padding: 1px 8px; white-space: nowrap; }
+  .keys { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--dim); margin-bottom: 8px; }
+  .keys .dot { display: inline-block; width: 9px; height: 4px; border-radius: 1px; margin-right: 6px; vertical-align: 2px; }
+  main { padding: 0 16px 24px; }
+  /* collapsible rows, Grafana dashboard-row style */
+  .rowhead { display: flex; align-items: center; gap: 8px; width: 100%; background: none; border: none; color: var(--text); font: 500 13px var(--font-ui); padding: 12px 2px 6px; cursor: pointer; text-align: left; }
+  .rowhead .chev { color: var(--dim); font-size: 10px; transition: transform .15s; }
+  .row.closed .chev { transform: rotate(-90deg); }
+  .rowhead .count { color: var(--faint); font-size: 11px; font-weight: 400; display: none; }
+  .row.closed .count { display: inline; }
+  .row.closed .grid { display: none; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 8px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 2px; padding: 10px 12px 12px; min-width: 0; }
+  .panel.wide { grid-column: 1 / -1; }
+  /* half-row panels fill rows the way Grafana packs them */
+  .panel.half { grid-column: span 2; }
+  @media (max-width: 760px) { .panel.half { grid-column: auto; } }
+  h2 { font-size: 13px; font-weight: 500; color: var(--text); margin-bottom: 10px; }
+  #gsx-chain, #gsx-corr, #gtx-view { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th { text-align: left; color: var(--dim); font-weight: 500; font-size: 12px; padding: 3px 12px 6px 6px; border-bottom: 1px solid var(--border-2); }
+  td { padding: 4px 12px 4px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tbody tr:hover td, table tr:hover td { background: rgba(204,204,220,.04); }
+  .num { text-align: right; font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .works { color: var(--green); } .blocked { color: var(--red); } .untested { color: var(--dim); }
+  .bar-row { display: grid; grid-template-columns: 220px 1fr 70px; gap: 10px; align-items: center; margin: 6px 0; font-size: 12px; font-family: var(--font-mono); }
+  .bar-track { background: var(--panel-2); border-radius: 1px; height: 14px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 1px; background: var(--bar1); }
+  .bar-fill.alt { background: var(--bar2); }
+  /* stat cards: label on top, threshold-colored value under it */
+  .facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 8px; }
+  .fact { background: var(--canvas); border: 1px solid var(--border); border-radius: 2px; padding: 8px 12px 10px; }
+  .fact .v { font: 500 19px/1.3 var(--font-mono); color: var(--green); font-variant-numeric: tabular-nums; }
+  .fact .l { font-size: 11px; color: var(--dim); }
+  .chip { display: inline-block; background: var(--panel-2); border-radius: 2px; padding: 1px 7px; font-size: 11px; font-family: var(--font-mono); white-space: nowrap; }
+  .live-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--faint); }
+  .live-dot.on { background: var(--green); animation: pulse 2s infinite; }
+  @keyframes pulse { 50% { opacity: .4; } }
+  @media (prefers-reduced-motion: reduce) { .live-dot.on { animation: none; } .rowhead .chev { transition: none; } }
+  button:focus-visible, a:focus-visible, select:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+  a { color: var(--link); }
+  .legend { color: var(--dim); font-size: 11px; margin-top: 8px; }
+  .legend .sw { display: inline-block; width: 9px; height: 4px; border-radius: 1px; margin: 0 4px 0 12px; vertical-align: 2px; }
+  .muted { color: var(--dim); }
+  /* tabs: quiet text with the Grafana brand-gradient underline when active */
+  .tabs { display: flex; gap: 16px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+  .tabs button { position: relative; background: none; color: var(--dim); border: none; padding: 4px 2px 7px; font: inherit; font-size: 13px; cursor: pointer; }
+  .tabs button:hover { color: var(--text); }
+  .tabs button.on { color: var(--text); }
+  .tabs button.on::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; border-radius: 1px; background: linear-gradient(270deg, #f55f3e 0%, #ff8833 100%); }
+  .runsel { background: var(--canvas); color: var(--text); border: 1px solid var(--border-2); border-radius: 2px; padding: 4px 8px; font: inherit; font-size: 13px; cursor: pointer; }
+  .runsel:hover { border-color: rgba(204,204,220,.30); }
+  .gtx-tip { color: var(--dim); font-size: 12px; font-family: var(--font-mono); min-height: 18px; margin-top: 8px; }
+  .gtx-crumb { font-size: 12px; margin-bottom: 8px; }
+  .gtx-crumb a { color: var(--link); cursor: pointer; text-decoration: underline; }
+  .drow { display: grid; grid-template-columns: minmax(240px, 46%) 1fr 64px; gap: 8px; align-items: center; margin: 3px 0; font-size: 12px; font-family: var(--font-mono); cursor: pointer; }
+  .drow:hover { background: rgba(204,204,220,.04); }
+  .drow .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .drow .caret { color: var(--dim); }
+  /* kernel names and op rosters are code: render them in mono */
+  #gsx-chain, #gsx-macro, #nevercaptured, #cudagraphs { font-family: var(--font-mono); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="shell">
+<aside id="sidebar"></aside>
+<div class="content">
+<nav class="topnav">
+  <h1 class="crumb"><span class="app">kvlm</span><span class="sep">/</span><span>Performance dashboard</span></h1>
+  <div class="navright">
+    <span class="live-dot" id="live-dot" title="live vLLM /metrics poll"></span>
+    <span class="toolchip" title="live panel refresh interval">&#10227; 5s</span>
+  </div>
+</nav>
+<div class="subbar">
+  <div id="gsx-runs" style="display:none"></div>
+  <div class="prov" id="prov">loading...</div>
+</div>
+<div id="viewtabs"></div>
+<main>
+
+<section class="row" id="sec-run">
+  <button class="rowhead" aria-expanded="true"><span class="chev">&#9662;</span>This run<span class="count">2 panels</span></button>
+  <div class="grid">
+    <div class="panel wide">
+      <h2>Inside the captured CUDA graph, with bottleneck verdicts</h2>
+      <div class="keys">
+        <span><span class="dot" style="background:var(--memory)"></span>waiting on memory</span>
+        <span><span class="dot" style="background:var(--load)"></span>scales with load</span>
+        <span><span class="dot" style="background:var(--latency)"></span>too small to fill the GPU</span>
+        <span><span class="dot" style="background:var(--accent)"></span>measured or live</span>
+      </div>
+      <div id="gsx-summary" class="legend"></div>
+      <div id="gsx-config" style="margin:8px 0"></div>
+      <div id="gsx-busy" style="margin:8px 0"></div>
+      <div id="gsx-timeline" style="margin:10px 0"></div>
+      <div id="gsx-macro" style="margin:10px 0"></div>
+      <div id="gsx-chain"></div>
+      <h2 style="margin-top:18px">From measurement to action</h2>
+      <div id="gsx-corr"></div>
+      <div class="legend">one decode step for the whole batch: the GPU runs these kernels top to bottom, repeats that for every layer, and the whole thing replays as a single CUDA graph launch. Bar length compares each kernel's time within one layer; the longest bar is where the step is spent. Verdicts, in plain terms: waiting on memory = the time goes to re-reading the weights, faster memory helps, more compute does not; scales with load = it does more work as the batch grows; too small to fill the GPU = a tiny launch, most of the chip idles for it. Regenerate for any capture with: kvlm profile graph -i capture.sqlite --gpu H100</div>
+    </div>
+
+    <div class="panel wide">
+      <h2>GPU time explorer (this run's whole capture: graph and eager)</h2>
+      <div class="tabs" id="gtx-tabs">
+        <button data-v="bars" class="on">ranked bars</button>
+        <button data-v="flame">flame</button>
+      </div>
+      <div class="gtx-crumb" id="gtx-crumb"></div>
+      <div id="gtx-view"><span class="muted">loading capture data...</span></div>
+      <div class="gtx-tip" id="gtx-tip"> </div>
+      <div class="legend">the whole GPU, not just the captured graph: the in-graph vs eager split is the story here. Click to drill in; use the breadcrumb to go back; flame is the clickable SVG.</div>
+    </div>
+  </div>
+</section>
+
+<section class="row" id="row-live" style="display:none">
+  <button class="rowhead" aria-expanded="true"><span class="chev">&#9662;</span>Live server<span class="count">1 panel</span></button>
+  <div class="grid">
+    <div class="panel wide" id="live-panel">
+      <h2>Server metrics (5 s window)</h2>
+      <div id="live-body" class="facts"><div class="muted">checking...</div></div>
+    </div>
+  </div>
+</section>
+
+<section class="row" id="sec-baseline">
+  <button class="rowhead" aria-expanded="true"><span class="chev">&#9662;</span><span id="base-title">H100 baseline (one-time reference characterization, not this run)</span><span class="count">6 panels</span></button>
+  <div class="grid">
+    <div class="wide" style="display:flex;align-items:center;gap:8px;padding:2px 0">
+      <span class="muted" style="font-size:12px">baseline source</span>
+      <select id="base-sel" class="runsel"><option value="">H100 characterization (registry)</option></select>
+    </div>
+
+    <div class="panel half">
+      <h2>Concurrency curve (measured)</h2>
+      <div id="curve"></div>
+      <div class="legend" id="curve-legend">unique random prompts, 1K in / 256 out
+        <span class="sw" style="background:var(--bar1)"></span>per-user tok/s
+        <span class="sw" style="background:var(--bar2)"></span>aggregate tok/s</div>
+    </div>
+
+    <div class="panel half">
+      <h2>Saturation behavior (KV pressure test)</h2>
+      <div class="facts" id="saturation"></div>
+    </div>
+
+    <div class="panel wide">
+      <h2>Reference numbers</h2>
+      <div class="facts" id="facts"></div>
+    </div>
+
+    <div class="panel half">
+      <h2>GPU time by kernel (baseline capture)</h2>
+      <div id="kernels"></div>
+      <div class="legend">graph-mode tracing hides 95% of this; node mode is the honest view</div>
+    </div>
+
+    <div class="panel half">
+      <h2>CUDA graph capture</h2>
+      <div class="facts" id="graphmetrics" style="margin-bottom:10px"></div>
+      <table id="cudagraphs"></table>
+    </div>
+
+    <div class="panel half">
+      <h2>Never inside a graph (runs eager)</h2>
+      <ul id="nevercaptured" style="padding-left:18px"></ul>
+      <div class="legend">vLLM's splitting_ops roster plus dynamic-shape work; profile these in the eager slice</div>
+    </div>
+  </div>
+</section>
+
+<section class="row" id="sec-toolbox">
+  <button class="rowhead" aria-expanded="true"><span class="chev">&#9662;</span>Toolbox<span class="count">1 panel</span></button>
+  <div class="grid">
+    <div class="panel half">
+      <h2>Profiling capability matrix</h2>
+      <table id="tools"></table>
+      <div class="legend">* = verified on real hardware; hover a cell for details. Each run's artifacts are browsable in the sidebar; .nsys-rep files open in the nsys-ui desktop app.</div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<script>
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+function barRow(label, val, max, cls, valText) {
+  const row = el('div', 'bar-row');
+  row.appendChild(el('div', '', label));
+  const track = el('div', 'bar-track');
+  const fill = el('div', 'bar-fill' + (cls ? ' ' + cls : ''));
+  fill.style.width = Math.max(1, 100 * val / max) + '%';
+  track.appendChild(fill);
+  row.appendChild(track);
+  row.appendChild(el('div', 'num', valText !== undefined ? valText : String(val)));
+  return row;
+}
+// Grafana classic visualization palette, hash-stable per name so the
+// same kernel keeps its color across bars, sunburst, and treemap (the
+// standalone flamegraph SVG keeps its own warm palette)
+const classicPalette = ['#73bf69', '#fade2a', '#5794f2', '#ff9830', '#f2495c', '#b877d9'];
+function warm(name) {
+  let h = 5381;
+  for (let i = 0; i < name.length; i++) h = ((h * 33) + name.charCodeAt(i)) & 0x7fffffff;
+  return classicPalette[h % classicPalette.length];
+}
+function pctOf(v, total) { return (100 * v / total).toFixed(1) + '%'; }
+
+// ─── GPU time explorer: four views over one folded dataset ─────────
+const gtx = {
+  root: null, cur: null, stack: [], view: 'bars', svgs: [],
+  tip(t) { document.getElementById('gtx-tip').textContent = t || ' '; },
+};
+
+function foldedToTree(text) {
+  const root = { name: 'all GPU time', value: 0, children: new Map() };
+  for (const line of text.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    const sp = t.lastIndexOf(' ');
+    if (sp < 0) continue;
+    const val = parseInt(t.slice(sp + 1), 10);
+    if (!(val > 0)) continue;
+    let node = root;
+    for (const part of t.slice(0, sp).split(';')) {
+      if (!node.children.has(part)) node.children.set(part, { name: part, value: 0, children: new Map() });
+      node = node.children.get(part);
+    }
+    node.value += val;
+  }
+  function finish(n) {
+    let kids = Array.from(n.children.values()).map(finish);
+    kids.sort((a, b) => b.total - a.total);
+    const childSum = kids.reduce((s, k) => s + k.total, 0);
+    if (n.value > 0 && kids.length) kids.push({ name: '(self)', total: n.value, children: [] });
+    return { name: n.name, total: n.value + childSum, children: kids };
+  }
+  return finish(root);
+}
+
+function gtxSetRoot(node, push) {
+  if (push && gtx.cur) gtx.stack.push(gtx.cur);
+  gtx.cur = node;
+  gtxRender();
+}
+function gtxCrumb() {
+  const c = document.getElementById('gtx-crumb');
+  c.innerHTML = '';
+  if (!gtx.stack.length) { return; }
+  const back = el('a', '', '← back');
+  back.onclick = () => { gtx.cur = gtx.stack.pop(); gtxRender(); };
+  c.appendChild(back);
+  c.appendChild(el('span', 'muted', '  viewing: ' + gtx.cur.name + ' (' + (gtx.cur.total / 1e6).toFixed(1) + ' s)'));
+}
+
+function renderBars(host) {
+  const total = gtx.cur.total;
+  host.innerHTML = '';
+  function build(node, depth, box) {
+    for (const k of node.children) {
+      const row = el('div', 'drow');
+      row.style.paddingLeft = (depth * 22) + 'px';
+      const lbl = el('div', 'lbl');
+      lbl.appendChild(el('span', 'caret', k.children.length ? '▸ ' : '  '));
+      lbl.appendChild(el('span', '', k.name));
+      lbl.title = k.name;
+      row.appendChild(lbl);
+      const track = el('div', 'bar-track');
+      const fill = el('div', 'bar-fill');
+      fill.style.background = warm(k.name);
+      fill.style.width = Math.max(0.4, 100 * k.total / total) + '%';
+      track.appendChild(fill);
+      row.appendChild(track);
+      row.appendChild(el('div', 'num', pctOf(k.total, total)));
+      box.appendChild(row);
+      if (k.children.length) {
+        const kidBox = el('div');
+        kidBox.style.display = depth === 0 ? 'block' : 'none';
+        box.appendChild(kidBox);
+        row.onclick = () => { kidBox.style.display = kidBox.style.display === 'none' ? 'block' : 'none'; };
+        build(k, depth + 1, kidBox);
+      }
+      row.onmouseover = () => gtx.tip(k.name + ': ' + (k.total / 1e6).toFixed(2) + ' s, ' + pctOf(k.total, total));
+      row.onmouseout = () => gtx.tip('');
+    }
+  }
+  build(gtx.cur, 0, host);
+}
+
+function renderFlameTab(host) {
+  host.innerHTML = '';
+  if (!gtx.svgs.length) { host.appendChild(el('div', 'muted', 'no flamegraph artifact found')); return; }
+  for (const a of gtx.svgs) {
+    const cap = el('div', 'legend');
+    cap.appendChild(el('span', '', a + ' '));
+    const full = el('a', '', 'open full page (clickable zoom)');
+    full.href = '/artifacts/' + a; full.target = '_blank';
+    cap.appendChild(full);
+    const obj = document.createElement('object');
+    obj.type = 'image/svg+xml';
+    obj.data = '/artifacts/' + a;
+    obj.style.width = '100%';
+    obj.style.borderRadius = '6px';
+    host.appendChild(cap);
+    host.appendChild(obj);
+  }
+}
+
+function gtxRender() {
+  gtxCrumb();
+  const host = document.getElementById('gtx-view');
+  if (!gtx.root) { host.innerHTML = ''; host.appendChild(el('span', 'muted', gtx.msg || 'no capture data')); return; }
+  if (gtx.view === 'bars') renderBars(host);
+  else renderFlameTab(host);
+}
+
+// the explorer follows the revision picker: each run's own folded
+// stacks and flamegraph (kvlm profile graph writes both beside the
+// graph JSON), so the in-graph vs eager split is per revision
+async function gtxLoadRun(name, arts) {
+  gtx.svgs = arts.filter(a => a.startsWith(name + '/') && a.endsWith('.svg'));
+  gtx.root = null; gtx.cur = null; gtx.stack = []; gtx.msg = '';
+  const folded = arts.find(a => a === name + '/gpu-folded.txt');
+  if (folded) {
+    const text = await (await fetch('/artifacts/' + folded)).text();
+    gtx.root = foldedToTree(text);
+    gtx.cur = gtx.root;
+  } else {
+    gtx.msg = 'no folded stacks in ' + name + '; regenerate with: kvlm profile graph -i profile-output/' + name + '/win.sqlite';
+  }
+  gtxRender();
+}
+
+document.getElementById('gtx-tabs').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  for (const x of document.querySelectorAll('#gtx-tabs button')) x.className = '';
+  b.className = 'on';
+  gtx.view = b.getAttribute('data-v');
+  gtx.cur = gtx.root; gtx.stack = [];
+  gtxRender();
+});
+
+// ─── Concurrency curve: computed line chart ────────────────────────
+// Two series on one chart, each scaled to its own maximum with the
+// value printed at every point (per-user falls, aggregate rises; the
+// crossing shape is the story). Works for any number of curve points.
+function renderCurve(points) {
+  const host = document.getElementById('curve');
+  host.innerHTML = '';
+  if (points.length < 2) return;
+  const ns = 'http://www.w3.org/2000/svg';
+  const W = 460, H = 200, padL = 30, padR = 30, padT = 22, padB = 34;
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+  svg.style.width = '100%';
+  const xs = points.map((p, i) => padL + i * (W - padL - padR) / (points.length - 1));
+  const y = (v, max) => padT + (1 - v / max) * (H - padT - padB);
+  function txt(x, yy, s, fill, anchor, size) {
+    const t = document.createElementNS(ns, 'text');
+    t.setAttribute('x', x); t.setAttribute('y', yy);
+    t.setAttribute('fill', fill); t.setAttribute('font-size', size || '11');
+    t.setAttribute('text-anchor', anchor || 'middle');
+    t.textContent = s;
+    svg.appendChild(t);
+  }
+  function series(vals, color, labelFmt) {
+    const max = Math.max(...vals) * 1.15;
+    const p = document.createElementNS(ns, 'path');
+    p.setAttribute('d', vals.map((v, i) => (i ? 'L' : 'M') + xs[i].toFixed(1) + ' ' + y(v, max).toFixed(1)).join(' '));
+    p.setAttribute('fill', 'none'); p.setAttribute('stroke', color); p.setAttribute('stroke-width', '2');
+    svg.appendChild(p);
+    vals.forEach((v, i) => {
+      const c = document.createElementNS(ns, 'circle');
+      c.setAttribute('cx', xs[i]); c.setAttribute('cy', y(v, max)); c.setAttribute('r', '3.5');
+      c.setAttribute('fill', color);
+      svg.appendChild(c);
+      txt(xs[i], y(v, max) - 8, labelFmt(v), color);
+    });
+  }
+  series(points.map(p => p.aggregate), 'var(--bar2)', v => v.toLocaleString());
+  series(points.map(p => p.perUser), 'var(--bar1)', v => String(v));
+  points.forEach((p, i) => txt(xs[i], H - 16, p.concurrency + (p.concurrency === 1 ? ' user' : ' users'), 'var(--dim)'));
+  points.forEach((p, i) => txt(xs[i], H - 4, 'TTFT ' + (p.ttftMs >= 1000 ? (p.ttftMs / 1000).toFixed(1) + ' s' : Math.round(p.ttftMs) + ' ms'), 'var(--dim)', 'middle', '10'));
+  host.appendChild(svg);
+}
+
+// ─── Measured metrics: computed cards and gauges ───────────────────
+// Metrics arrive as {key,label,value,unit,max,note}; everything shown
+// is computed from those fields. max > 0 draws a gauge; value over max
+// renders the arc in the warning color (an overshoot, like power above
+// its cap). Future collection runs only add entries to the registry.
+function fmtVal(v) {
+  if (Math.abs(v) >= 1000 && Number.isInteger(v)) return v.toLocaleString();
+  return String(v);
+}
+
+function gaugeSVG(frac, over) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const C = Math.PI * 26;
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('width', '64');
+  svg.setAttribute('height', '42');
+  svg.setAttribute('viewBox', '0 0 64 42');
+  svg.style.flexShrink = '0';
+  function arc(color, dash) {
+    const p = document.createElementNS(ns, 'path');
+    p.setAttribute('d', 'M 6 38 A 26 26 0 0 1 58 38');
+    p.setAttribute('fill', 'none');
+    p.setAttribute('stroke', color);
+    p.setAttribute('stroke-width', '8');
+    p.setAttribute('stroke-linecap', 'round');
+    if (dash !== null) p.setAttribute('stroke-dasharray', dash.toFixed(1) + ' ' + (C + 10).toFixed(1));
+    return p;
+  }
+  svg.appendChild(arc('var(--line)', null));
+  svg.appendChild(arc(over ? 'var(--bad)' : 'var(--accent)', C * Math.min(frac, 1)));
+  return svg;
+}
+
+function metricCard(m) {
+  const card = el('div', 'fact');
+  const val = fmtVal(m.value) + (m.unit ? ' ' + m.unit : '');
+  const txt = el('div');
+  // stat-panel order: small label on top, big value under it
+  txt.appendChild(el('div', 'l', m.label));
+  txt.appendChild(el('div', 'v', val));
+  if (m.max > 0) {
+    card.style.cssText = 'display:flex;gap:12px;align-items:center';
+    card.appendChild(gaugeSVG(m.value / m.max, m.value > m.max));
+    const parts = [];
+    // "96% of 100 %" is noise when the value already is a percentage
+    if (!(m.unit || '').startsWith('%')) parts.push(Math.round(100 * m.value / m.max) + '% of ' + fmtVal(m.max) + ' ' + m.unit);
+    if (m.note) parts.push(m.note);
+    if (parts.length) txt.appendChild(el('div', 'l', parts.join(', ')));
+  } else if (m.note) {
+    txt.appendChild(el('div', 'l', m.note));
+  }
+  card.appendChild(txt);
+  return card;
+}
+
+// ─── CUDA graph anatomy: chain plus bottleneck verdicts ────────────
+function verdictColor(v) {
+  if (v.startsWith('waiting on memory')) return 'var(--memory)';
+  if (v.startsWith('scales with load')) return 'var(--load)';
+  if (v.startsWith('too small')) return 'var(--latency)';
+  return 'var(--dim)';
+}
+
+function graphNodeRow(chain, n, maxUs, showPct) {
+  const row = el('div');
+  row.style.cssText = 'display:grid;grid-template-columns:28px minmax(200px,1fr) minmax(120px,0.8fr) 120px minmax(200px,1fr);gap:8px;align-items:center;padding:3px 0;border-bottom:1px solid var(--line)';
+  row.appendChild(el('div', 'muted', String(n.pos)));
+  const lbl = el('div');
+  lbl.style.minWidth = '0';
+  const nameLine = el('div', '', n.name);
+  nameLine.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+  lbl.appendChild(nameLine);
+  const catLine = el('div', 'muted', (n.category || 'kernel') + '  grid ' + n.grid);
+  catLine.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+  lbl.appendChild(catLine);
+  lbl.title = n.name;
+  row.appendChild(lbl);
+  const track = el('div', 'bar-track');
+  const fill = el('div', 'bar-fill');
+  fill.style.background = warm(n.name);
+  fill.style.width = Math.max(0.6, 100 * n.avgUs / maxUs) + '%';
+  track.appendChild(fill);
+  row.appendChild(track);
+  const num = el('div', 'num', n.avgUs + ' us' + (showPct && n.pctOfLayer ? '  ' + n.pctOfLayer + '%' : ''));
+  if (n.deltaPct !== undefined && n.deltaPct !== null) {
+    const d = el('div', '', (n.deltaPct > 0 ? '+' : '') + n.deltaPct + '% vs ' + n.deltaRun);
+    d.style.cssText = 'font-size:11px;color:' + (n.deltaPct > 2 ? 'var(--bad)' : n.deltaPct < -2 ? 'var(--accent)' : 'var(--dim)');
+    num.appendChild(d);
+  }
+  row.appendChild(num);
+  const v = el('div');
+  v.style.fontSize = '12px';
+  v.style.color = verdictColor(n.verdict || '');
+  v.textContent = n.verdict || (n.ratio ? 'batch ratio ' + n.ratio : '');
+  if (n.ratio) v.title = 'time in second captured batch size / time here: ' + n.ratio;
+  // a flat kernel whose worst replay is many times its average is
+  // stalling, not working: on multi-GPU that is one device waiting at
+  // the all-reduce for its peer (batch-scaling kernels excluded, a
+  // spread is expected there)
+  if (n.maxUs && n.avgUs > 0 && n.maxUs > 5 * n.avgUs && !(n.verdict || '').startsWith('scales')) {
+    const sk = el('div', '', 'worst replay ' + Math.round(n.maxUs) + ' us' +
+      (n.name.includes('cross_device') || n.name.includes('nccl') ? ': one GPU waiting for the other' : ''));
+    sk.style.cssText = 'font-size:11px;color:var(--orange)';
+    v.appendChild(sk);
+  }
+  row.appendChild(v);
+  chain.appendChild(row);
+}
+
+// ─── Profiling revisions: every profile-output/<run>/ directory with
+// a graph-structure.json is a run; pick one, optionally diff another.
+const gsx2 = { runs: {}, names: [], sel: null, cmp: null };
+
+async function gsxData(name) {
+  const r = gsx2.runs[name];
+  if (!r.data) r.data = await (await fetch('/artifacts/' + r.file)).json();
+  return r.data;
+}
+
+// natural sort so run10 lands after run9, not after run1; works for
+// any dir naming with embedded numbers
+function natCmp(a, b) {
+  const re = /(\d+)|(\D+)/g;
+  const as = a.match(re) || [], bs = b.match(re) || [];
+  for (let i = 0; i < Math.max(as.length, bs.length); i++) {
+    const x = as[i], y = bs[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    const nx = parseInt(x, 10), ny = parseInt(y, 10);
+    if (!isNaN(nx) && !isNaN(ny)) { if (nx !== ny) return nx - ny; }
+    else if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+// dropdown picker: scales to hundreds of runs where chips cannot;
+// newest first, keyboard friendly, one control per role
+function gsxPicker() {
+  const host = document.getElementById('gsx-runs');
+  if (gsx2.names.length < 2) { host.style.display = 'none'; return; }
+  host.innerHTML = '';
+  host.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap';
+  const newestFirst = [...gsx2.names].sort(natCmp).reverse();
+  function picker(label, opts, cur, onpick) {
+    host.appendChild(el('span', 'muted', label));
+    const s = document.createElement('select');
+    s.className = 'runsel';
+    for (const o of opts) {
+      const op = document.createElement('option');
+      op.value = o;
+      op.textContent = o;
+      if (o === cur) op.selected = true;
+      s.appendChild(op);
+    }
+    s.onchange = () => onpick(s.value);
+    host.appendChild(s);
+  }
+  picker('run', newestFirst, gsx2.sel, v => {
+    gsx2.sel = v;
+    if (gsx2.cmp === v) gsx2.cmp = null;
+    gsxShow();
+  });
+  // only graph-bearing runs can be a comparison baseline
+  const comparable = newestFirst.filter(n => n !== gsx2.sel && gsx2.runs[n].file);
+  if (gsx2.runs[gsx2.sel].file && comparable.length) {
+    picker('compare', ['none', ...comparable], gsx2.cmp || 'none', v => {
+      gsx2.cmp = v === 'none' ? null : v;
+      gsxShow();
+    });
+  }
+  host.appendChild(el('span', 'muted', gsx2.names.length + ' runs recorded'));
+}
+
+async function loadGraphStructure(artifacts) {
+  const sum = document.getElementById('gsx-summary');
+  // every run directory is a revision, whatever kind of capture it
+  // holds; runs without a graph capture show their record instead
+  gsx2.runs = {};
+  for (const a of artifacts) {
+    if (!a.includes('/')) continue;
+    const dir = a.slice(0, a.indexOf('/'));
+    if (!gsx2.runs[dir]) gsx2.runs[dir] = { file: null, arts: [], data: null };
+    gsx2.runs[dir].arts.push(a);
+    if (a.endsWith('graph-structure.json')) gsx2.runs[dir].file = a;
+  }
+  gsx2.names = Object.keys(gsx2.runs).sort(natCmp);
+  if (!gsx2.names.length) { sum.textContent = 'no runs recorded under profile-output/ yet'; return; }
+  // land on the newest run that has a graph; every run stays pickable
+  gsx2.sel = gsx2.names[gsx2.names.length - 1];
+  for (let i = gsx2.names.length - 1; i >= 0; i--) {
+    if (gsx2.runs[gsx2.names[i]].file) { gsx2.sel = gsx2.names[i]; break; }
+  }
+  gsx2.cmp = null;
+  await gsxShow();
+}
+
+async function gsxShow() {
+  gsxPicker();
+  if (window.uiRefresh) window.uiRefresh();
+  const r = gsx2.runs[gsx2.sel];
+  gtxLoadRun(gsx2.sel, r.arts);
+  if (!r.file) { await renderRunRecord(gsx2.sel, r); return; }
+  const g = await gsxData(gsx2.sel);
+  let cmp = null;
+  if (gsx2.cmp && gsx2.runs[gsx2.cmp].file) cmp = await gsxData(gsx2.cmp);
+  renderGraphPanel(g, cmp);
+}
+
+// renderRunRecord: a revision with no CUDA graph capture (a torch
+// profiler run, or artifacts collected without nsys). Shows what the
+// run is: its environment fingerprint and its artifacts.
+async function renderRunRecord(name, r) {
+  const sum = document.getElementById('gsx-summary');
+  const chain = document.getElementById('gsx-chain');
+  document.getElementById('gsx-macro').innerHTML = '';
+  document.getElementById('gsx-corr').innerHTML = '';
+  document.getElementById('gsx-timeline').innerHTML = '';
+  document.getElementById('gsx-config').innerHTML = '';
+  const busy = document.getElementById('gsx-busy');
+  busy.textContent = '';
+  busy.style.cssText = '';
+  chain.innerHTML = '';
+
+  let envLine = '';
+  const envArt = r.arts.find(a => a.endsWith('env.txt'));
+  if (envArt) {
+    try {
+      const txt = await (await fetch('/artifacts/' + envArt)).text();
+      envLine = ' Environment: ' + txt.trim().split('\n').join('; ') + '.';
+    } catch (e) { /* record stays useful without it */ }
+  }
+  const kind = r.arts.some(a => a.includes('.pt.trace.json')) ?
+    'a torch profiler run; open the rank0 trace at ui.perfetto.dev for the GPU worker timeline' :
+    'no CUDA graph capture in this run';
+  sum.textContent = name + ': ' + kind + '.' + envLine;
+
+  const head = el('div');
+  head.style.cssText = 'display:grid;grid-template-columns:1fr max-content;gap:8px;padding:3px 0;border-bottom:1px solid var(--line)';
+  for (const h of ['Artifact', 'View']) head.appendChild(el('div', 'muted', h));
+  chain.appendChild(head);
+  for (const a of r.arts) {
+    const row = el('div');
+    row.style.cssText = 'display:grid;grid-template-columns:1fr max-content;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid var(--line)';
+    row.appendChild(el('div', '', a));
+    const link = el('a', '', a.endsWith('.gz') || a.endsWith('.nsys-rep') || a.endsWith('.sqlite') ? 'download' : 'open');
+    link.href = '/artifacts/' + a;
+    if (!(a.endsWith('.gz') || a.endsWith('.nsys-rep') || a.endsWith('.sqlite'))) link.target = '_blank';
+    row.appendChild(link);
+    chain.appendChild(row);
+  }
+}
+
+// The capture timeline: GPU kernel-busy per bin, one line per device.
+// This is the time axis nsys-ui has and static summaries lack — the
+// probe plateaus, the drain between them, and (multi-GPU) whether the
+// devices move in lockstep are all visible in the shape.
+function renderTimeline(host, tl) {
+  host.innerHTML = '';
+  if (!tl || !tl.series || !tl.series.length) return;
+  const ns = 'http://www.w3.org/2000/svg';
+  const W = 900, H = 130, padL = 36, padR = 50, padT = 10, padB = 20;
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+  svg.style.width = '100%';
+  const n = Math.max(...tl.series.map(s => s.busy.length));
+  const x = i => padL + i * (W - padL - padR) / Math.max(1, n - 1);
+  const y = v => padT + (1 - v / 100) * (H - padT - padB);
+  function txt(xx, yy, s, anchor) {
+    const t = document.createElementNS(ns, 'text');
+    t.setAttribute('x', xx); t.setAttribute('y', yy);
+    t.setAttribute('fill', 'rgba(204,204,220,.65)'); t.setAttribute('font-size', '10');
+    t.setAttribute('text-anchor', anchor || 'start');
+    t.textContent = s;
+    svg.appendChild(t);
+    return t;
+  }
+  for (const gv of [0, 50, 100]) {
+    const ln = document.createElementNS(ns, 'line');
+    ln.setAttribute('x1', padL); ln.setAttribute('x2', W - padR);
+    ln.setAttribute('y1', y(gv)); ln.setAttribute('y2', y(gv));
+    ln.setAttribute('stroke', 'rgba(204,204,220,.12)');
+    svg.appendChild(ln);
+    txt(padL - 4, y(gv) + 3, gv + '%', 'end');
+  }
+  const totalS = n * tl.binMs / 1000;
+  for (const fs of [0, 0.25, 0.5, 0.75, 1]) {
+    txt(padL + fs * (W - padL - padR), H - 6, (fs * totalS).toFixed(0) + ' s', 'middle');
+  }
+  const colors = ['var(--green)', 'var(--blue)', 'var(--orange)', 'var(--purple)'];
+  tl.series.forEach((s, si) => {
+    const c = colors[si % colors.length];
+    const p = document.createElementNS(ns, 'path');
+    p.setAttribute('d', s.busy.map((v, i) => (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(v).toFixed(1)).join(' '));
+    p.setAttribute('fill', 'none'); p.setAttribute('stroke', c); p.setAttribute('stroke-width', '1.4');
+    svg.appendChild(p);
+    // stack the labels: series often end at the same busy value
+    const lbl = txt(W - padR + 4, padT + 8 + si * 12, 'GPU ' + s.device);
+    lbl.setAttribute('fill', c);
+  });
+  host.appendChild(svg);
+  const cap = el('div', 'legend', 'GPU kernel-busy over the capture window, ' +
+    tl.binMs + ' ms bins' + (tl.series.length > 1 ? ', one line per GPU; parallel lines mean the devices run in lockstep' : '') +
+    '. With a probe run, the two plateaus and the drain between them are the shape.');
+  host.appendChild(cap);
+}
+
+// annotate the selected run's nodes with percent deltas against the
+// comparison run, matched by position when the units line up
+function annotateDeltas(nodes, cmpNodes, cmpName) {
+  const byPos = new Map();
+  for (const n of cmpNodes) byPos.set(n.pos, n);
+  return nodes.map(n => {
+    const o = byPos.get(n.pos);
+    const m = { ...n };
+    if (o && o.name === n.name && o.avgUs > 0) {
+      m.deltaPct = Math.round(1000 * (n.avgUs - o.avgUs) / o.avgUs) / 10;
+      m.deltaRun = cmpName;
+    }
+    return m;
+  });
+}
+
+// renderConfig: the run's flag state — explicit flags as chips, and
+// in compare mode the relevant keys whose values differ between the
+// two revisions. Old runs without a captured config say so.
+function renderConfig(host, g, cmp) {
+  host.innerHTML = '';
+  if (!g.config) {
+    host.appendChild(el('div', 'legend', 'no flag state captured in this run (kvlm profile run now records vllm-args.txt and the per-version flag catalog)'));
+    return;
+  }
+  const c = g.config;
+  const wrap = el('div');
+  wrap.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;align-items:center';
+  wrap.appendChild(el('span', 'muted', 'vLLM ' + (c.version || '?') + ', explicit flags:'));
+  const entries = Object.entries(c.explicit || {});
+  for (const [k, v] of entries) {
+    const short = v.length > 40 ? v.slice(0, 37) + '...' : v;
+    const ch = chip(k + '=' + short);
+    ch.title = k + ' = ' + v;
+    wrap.appendChild(ch);
+  }
+  if (!entries.length) wrap.appendChild(el('span', 'muted', 'none (all defaults)'));
+  host.appendChild(wrap);
+  if (cmp && cmp.config && cmp.config.effective && c.effective) {
+    const diffs = [];
+    const keys = new Set([...Object.keys(c.effective), ...Object.keys(cmp.config.effective)]);
+    for (const k of keys) {
+      const a = c.effective[k], b2 = cmp.config.effective[k];
+      if (a !== b2) diffs.push([k, a, b2]);
+    }
+    if (diffs.length) {
+      const d = el('div');
+      d.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px';
+      d.appendChild(el('span', 'muted', 'config diff vs ' + gsx2.cmp + ':'));
+      for (const [k, a, b2] of diffs) {
+        const ch = chip(k + ': ' + (a ?? '-') + ' vs ' + (b2 ?? '-'), 'var(--orange)');
+        d.appendChild(ch);
+      }
+      host.appendChild(d);
+    } else {
+      host.appendChild(el('div', 'legend', 'same relevant config as ' + gsx2.cmp));
+    }
+  }
+}
+
+function renderGraphPanel(g, cmp) {
+  const sum = document.getElementById('gsx-summary');
+  const chain = document.getElementById('gsx-chain');
+  const macro = document.getElementById('gsx-macro');
+  chain.innerHTML = '';
+  macro.innerHTML = '';
+  renderConfig(document.getElementById('gsx-config'), g, cmp);
+  renderTimeline(document.getElementById('gsx-timeline'), g.timeline);
+
+  const busy = document.getElementById('gsx-busy');
+  busy.textContent = '';
+  busy.style.cssText = '';
+  if (g.window && g.window.verdict) {
+    busy.style.cssText = 'border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:6px;padding:6px 10px';
+    const dev = g.window.devices > 1 ? ' across ' + g.window.devices + ' GPUs' : '';
+    let btxt = g.window.verdict + ' (' + g.window.gpuBusyS + ' s of kernels' + dev + ' in a ' + g.window.wallS + ' s window)';
+    if (cmp && cmp.window) btxt += '; ' + gsx2.cmp + ' was ' + cmp.window.busyPct + '% busy';
+    busy.textContent = btxt;
+  }
+
+  if (!g.chain) {
+    sum.textContent = g.provenance + '. No repeating layer block detected; heaviest nodes below.';
+    let tops = g.topNodes;
+    if (cmp && cmp.topNodes) tops = annotateDeltas(tops, cmp.topNodes, gsx2.cmp);
+    const maxUs = Math.max(...tops.map(n => n.avgUs));
+    for (const n of tops) graphNodeRow(chain, n, maxUs, true);
+    renderCorrelation(g.correlation);
+    return;
+  }
+
+  const c = g.chain;
+  let replayLine = 'graph ' + c.graphId + ': ' + c.nodes + ' kernel nodes, replayed ' +
+    c.replays.toLocaleString() + ' times in the window; one replay = ' +
+    (c.replayUs / 1000).toFixed(1) + ' ms of GPU work per step.';
+  if (cmp && cmp.chain && cmp.chain.replayUs > 0) {
+    const d = Math.round(1000 * (c.replayUs - cmp.chain.replayUs) / cmp.chain.replayUs) / 10;
+    replayLine += ' Replay is ' + (d > 0 ? d + '% slower than ' : (-d) + '% faster than ') + gsx2.cmp +
+      ' (' + (cmp.chain.replayUs / 1000).toFixed(1) + ' ms).';
+  }
+  sum.textContent = replayLine +
+    (c.comparisonGraphId ? ' Batch ratios compare against graph ' + c.comparisonGraphId + '.' : '') +
+    ' ' + g.provenance +
+    (g.env && g.env.length ? ' Environment: ' + g.env.join('; ') + '.' : '');
+
+  macro.style.cssText = 'display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:10px 0';
+  const boxes = [];
+  for (const n of c.prologue) boxes.push([n.name, n.avgUs + ' us']);
+  boxes.push(['layer block x ' + c.unitRepeats + ' (' + c.unit.length + ' nodes)', c.layerUs + ' us per layer']);
+  for (const n of c.epilogue) boxes.push([n.name, n.avgUs + ' us']);
+  boxes.forEach(([name, t], i) => {
+    if (i) macro.appendChild(el('span', 'muted', '→'));
+    const b = el('div');
+    b.style.cssText = 'border:1px solid var(--line);border-radius:6px;padding:6px 10px';
+    b.appendChild(el('div', '', name));
+    b.appendChild(el('div', 'muted', t));
+    macro.appendChild(b);
+  });
+
+  const head = el('div');
+  head.style.cssText = 'display:grid;grid-template-columns:28px minmax(200px,1fr) minmax(120px,0.8fr) 120px minmax(200px,1fr);gap:8px;padding:3px 0;border-bottom:1px solid var(--line)';
+  for (const h of ['#', 'Kernel (runs top to bottom, once per layer)', 'Share of layer time', 'Avg time', 'Why']) {
+    const th = el('div', 'muted', h);
+    th.style.fontSize = '11px';
+    head.appendChild(th);
+  }
+  chain.appendChild(head);
+  let unit = c.unit;
+  if (cmp && cmp.chain && cmp.chain.unit) unit = annotateDeltas(unit, cmp.chain.unit, gsx2.cmp);
+  const maxUs = Math.max(...unit.map(n => n.avgUs));
+  for (const n of unit) graphNodeRow(chain, n, maxUs, true);
+  renderCorrelation(g.correlation);
+}
+
+// The correlation cards: one per bottleneck class, colored like its
+// verdicts, with the share of layer time as a bar, each serve flag as
+// a chip with its effect, and the kernel source paths. Computed by
+// kvlm profile graph, so a new capture updates it.
+function chip(text, color) {
+  const c = el('span', 'chip', text);
+  if (color) c.style.color = color;
+  return c;
+}
+
+function renderCorrelation(rows) {
+  const host = document.getElementById('gsx-corr');
+  host.innerHTML = '';
+  if (!rows || !rows.length) return;
+  for (const r of rows) {
+    const color = verdictColor(r.class);
+    const card = el('div');
+    card.style.cssText = 'border:1px solid var(--line);border-left:3px solid ' + color + ';border-radius:6px;padding:10px 14px;margin:8px 0';
+
+    const head = el('div');
+    head.style.cssText = 'display:grid;grid-template-columns:minmax(180px,0.6fr) 1fr max-content;gap:12px;align-items:center';
+    const name = el('div', '', r.class);
+    name.style.color = color;
+    head.appendChild(name);
+    const track = el('div', 'bar-track');
+    const fill = el('div', 'bar-fill');
+    fill.style.background = color;
+    fill.style.width = Math.max(0.6, r.pctOfLayer) + '%';
+    track.appendChild(fill);
+    head.appendChild(track);
+    const share = el('div', 'num', r.pctOfLayer + '% of layer, ' + r.nodes + (r.nodes === 1 ? ' node' : ' nodes'));
+    share.style.whiteSpace = 'nowrap';
+    head.appendChild(share);
+    card.appendChild(head);
+
+    const body = el('div');
+    body.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:8px 24px;margin-top:10px';
+    const levers = el('div');
+    levers.appendChild(el('div', 'legend', 'vllm parameters to tweak'));
+    for (const l of r.levers) {
+      const row = el('div');
+      row.style.cssText = 'display:flex;gap:8px;align-items:baseline;margin:4px 0';
+      const pc = chip(l.param + (l.current ? ' (now ' + l.current + ')' : ''), l.applied ? 'var(--dim)' : 'var(--accent)');
+      if (l.applied) pc.title = 'already set on this server';
+      row.appendChild(pc);
+      const eff = el('span', 'muted', l.applied ? 'already set: ' + l.effect : l.effect);
+      eff.style.fontSize = '12px';
+      row.appendChild(eff);
+      levers.appendChild(row);
+    }
+    if (!r.levers.length) levers.appendChild(el('div', 'muted', 'nothing to tune here'));
+    body.appendChild(levers);
+
+    const kern = el('div');
+    kern.appendChild(el('div', 'legend', 'kernel code to optimize'));
+    const kwrap = el('div');
+    kwrap.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-top:4px';
+    for (const p of r.kernels) kwrap.appendChild(chip(p));
+    kern.appendChild(kwrap);
+    body.appendChild(kern);
+    card.appendChild(body);
+
+    host.appendChild(card);
+  }
+}
+
+// ─── Baseline row: registry characterization or any collected run ──
+let summaryData = null;
+
+function baseHosts() {
+  const ids = ['curve', 'kernels', 'facts', 'saturation', 'graphmetrics', 'cudagraphs'];
+  const h = {};
+  for (const id of ids) { h[id] = document.getElementById(id); h[id].innerHTML = ''; }
+  return h;
+}
+
+let curveLegendRegistry = null;
+
+function fillRegistryBaseline() {
+  const s = summaryData;
+  const h = baseHosts();
+  document.getElementById('base-title').textContent = 'H100 baseline (one-time reference characterization, not this run)';
+  const legend = document.getElementById('curve-legend');
+  if (curveLegendRegistry === null) curveLegendRegistry = legend.innerHTML;
+  legend.innerHTML = curveLegendRegistry;
+  legend.style.display = '';
+  renderCurve(s.measured.curve);
+  for (const k of s.measured.kernels) h.kernels.appendChild(barRow(k.name, k.pct, 100, '', k.pct + '%'));
+  for (const m of s.measured.metrics) h.facts.appendChild(metricCard(m));
+  for (const m of s.measured.saturation) h.saturation.appendChild(metricCard(m));
+  for (const m of s.measured.graphMetrics) h.graphmetrics.appendChild(metricCard(m));
+  for (const f of s.measured.cudaGraphs) {
+    const tr = el('tr');
+    tr.appendChild(el('td', 'muted', f.label));
+    tr.appendChild(el('td', '', f.value));
+    h.cudagraphs.appendChild(tr);
+  }
+}
+
+// a run as baseline: everything shown is derived from that run's own
+// artifacts (server log, metrics deltas, folded stacks, graph JSON);
+// panels whose data the run did not collect say so instead of
+// borrowing the registry numbers
+async function fillRunBaseline(run) {
+  const h = baseHosts();
+  document.getElementById('base-title').textContent = run + ' baseline (derived from this run\'s artifacts)';
+  const legend = document.getElementById('curve-legend');
+  legend.style.display = 'none';
+
+  // sweep.json: the per-run concurrency sweep and KV pressure probe
+  // that a full kvlm profile run measures on idle servers
+  const r0 = gsx2.runs[run];
+  const sweepArt = (r0 ? r0.arts : []).find(a => a === run + '/sweep.json');
+  let sw = null;
+  if (sweepArt) {
+    try { sw = await (await fetch('/artifacts/' + sweepArt)).json(); } catch (e) { sw = null; }
+  }
+  if (sw && sw.curve && sw.curve.length >= 2) {
+    renderCurve(sw.curve);
+    legend.style.display = '';
+    legend.innerHTML = '';
+    legend.appendChild(document.createTextNode('short unique prompts, 256 out, measured by this run\'s sweep'));
+    for (const [color, name] of [['var(--bar1)', 'per-user tok/s'], ['var(--bar2)', 'aggregate tok/s']]) {
+      const swx = el('span', 'sw');
+      swx.style.background = color;
+      legend.appendChild(swx);
+      legend.appendChild(document.createTextNode(name));
+    }
+  } else {
+    h.curve.appendChild(el('div', 'muted', 'no concurrency sweep in ' + run + '; a full kvlm profile run against an idle server measures one'));
+  }
+  if (sw && sw.pressure) {
+    const p = sw.pressure;
+    const cards = [
+      { label: 'demand', value: p.streams, unit: 'streams', max: 0, note: 'up to ' + p.maxTokens + ' tokens each, ' + p.seconds + ' s' },
+      { label: 'peak running', value: p.peakRunning, unit: '', max: 0, note: '' },
+      { label: 'peak waiting', value: p.peakWaiting, unit: '', max: 0, note: p.peakWaiting > 0 ? 'vLLM queues beyond this point' : 'never queued' },
+      { label: 'peak KV usage', value: p.peakKvPct, unit: '%', max: 100, note: '' },
+      { label: 'preemptions under pressure', value: p.preemptions, unit: '', max: 0, note: p.preemptions > 0 ? 'KV pressure: raise --gpu-memory-utilization or lower --max-num-seqs' : 'no KV pressure' },
+      ...(p.boundBy ? [{ label: 'bound by', value: p.boundBy === 'max-num-seqs' ? '--max-num-seqs' : p.boundBy, unit: '', max: 0, note: p.boundBy === 'max-num-seqs' ? 'pinned at the scheduler cap (' + p.maxNumSeqs + '); raising it is the lever' : p.boundBy === 'kv' ? 'KV pool saturated; memory levers apply' : 'neither cap reached in this window' }] : []),
+      { label: 'TTFT under pressure', value: p.ttftMeanMs >= 1000 ? Math.round(p.ttftMeanMs / 100) / 10 : p.ttftMeanMs, unit: p.ttftMeanMs >= 1000 ? 's' : 'ms', max: 0, note: 'mean during the pressure window' },
+    ];
+    for (const m of cards) h.saturation.appendChild(metricCard(m));
+  } else {
+    h.saturation.appendChild(el('div', 'muted', 'no KV pressure probe in ' + run + '; a full kvlm profile run against an idle server measures one'));
+  }
+
+  const d = await (await fetch('/api/baseline/' + run)).json();
+  if (d.metrics && d.metrics.length) {
+    for (const m of d.metrics) h.facts.appendChild(metricCard(m));
+  } else {
+    h.facts.appendChild(el('div', 'muted', 'no server log or metrics files in ' + run));
+  }
+
+  const r = gsx2.runs[run];
+  const arts = r ? r.arts : [];
+  const folded = arts.find(a => a === run + '/gpu-folded.txt');
+  if (folded) {
+    const text = await (await fetch('/artifacts/' + folded)).text();
+    const tree = foldedToTree(text);
+    // collapse scopes: total time per kernel across graph and eager
+    const byName = new Map();
+    for (const scope of tree.children) {
+      for (const k of scope.children) {
+        byName.set(k.name, (byName.get(k.name) || 0) + k.total);
+      }
+    }
+    const top = [...byName.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
+    const rest = tree.total - top.reduce((s2, [, v]) => s2 + v, 0);
+    for (const [name, v] of top) h.kernels.appendChild(barRow(name, v, tree.total, '', pctOf(v, tree.total)));
+    if (rest > 0) h.kernels.appendChild(barRow('other', rest, tree.total, 'alt', pctOf(rest, tree.total)));
+  } else {
+    h.kernels.appendChild(el('div', 'muted', 'no folded stacks in ' + run));
+  }
+
+  if (r && r.file) {
+    const g = await gsxData(run);
+    const cards = [];
+    if (g.graphs) cards.push({ label: 'CUDA graphs captured', value: g.graphs.length, unit: '', max: 0, note: 'distinct executable graphs in the window' });
+    if (g.chain) cards.push({ label: 'dominant graph', value: g.chain.nodes, unit: 'nodes', max: 0, note: g.chain.replays.toLocaleString() + ' replays' });
+    if (g.window) cards.push({ label: 'GPU busy in the window', value: g.window.busyPct, unit: '%', max: 100, note: g.window.devices > 1 ? 'per device, ' + g.window.devices + ' GPUs' : '' });
+    for (const m of cards) h.graphmetrics.appendChild(metricCard(m));
+    const rows = [];
+    if (g.window) rows.push(['capture window', g.window.wallS + ' s']);
+    if (g.chain) rows.push(['one replay', (g.chain.replayUs / 1000).toFixed(1) + ' ms of GPU work']);
+    for (const [l, v] of rows) {
+      const tr = el('tr');
+      tr.appendChild(el('td', 'muted', l));
+      tr.appendChild(el('td', '', v));
+      h.cudagraphs.appendChild(tr);
+    }
+  } else {
+    h.graphmetrics.appendChild(el('div', 'muted', 'no CUDA graph capture in ' + run));
+  }
+}
+
+// the picker lists every recorded run; called once the revision list
+// is known
+function baseInit() {
+  const sel = document.getElementById('base-sel');
+  const newestFirst = [...gsx2.names].sort(natCmp).reverse();
+  for (const n of newestFirst) {
+    const op = document.createElement('option');
+    op.value = n;
+    op.textContent = n;
+    sel.appendChild(op);
+  }
+  sel.onchange = () => {
+    location.hash = sel.value === '' ? '' : 'baseline=' + sel.value;
+    sel.value === '' ? fillRegistryBaseline() : fillRunBaseline(sel.value);
+  };
+  // deep link: #baseline=<run> preselects a run as the baseline
+  const m = location.hash.match(/baseline=([^&]+)/);
+  if (m && gsx2.runs[m[1]]) {
+    sel.value = m[1];
+    fillRunBaseline(m[1]);
+  }
+}
+
+async function loadSummary() {
+  const s = await (await fetch('/api/summary')).json();
+  summaryData = s;
+  const prov = document.getElementById('prov');
+  prov.innerHTML = '';
+  for (const part of s.measured.provenance.split(', ')) prov.appendChild(el('span', 'spec', part));
+
+  fillRegistryBaseline();
+
+  const nc = document.getElementById('nevercaptured');
+  for (const n of s.measured.neverCaptured) {
+    nc.appendChild(el('li', '', n));
+  }
+
+  const tools = document.getElementById('tools');
+  const th = el('tr');
+  for (const h of ['Tool', 'RunPod', 'K8s', 'Bare metal']) th.appendChild(el('th', '', h));
+  tools.appendChild(th);
+  for (const t of s.tools) {
+    const tr = el('tr');
+    tr.appendChild(el('td', '', t.name));
+    for (const env of ['runpod', 'k8s', 'baremetal']) {
+      const sup = t.support.find(x => x.env === env);
+      const td = el('td', sup ? sup.status : 'untested', sup ? sup.status + (sup.verified ? ' *' : '') : '-');
+      if (sup && (sup.reason || sup.verified)) td.title = [sup.reason, sup.verified].filter(Boolean).join('; ');
+      tr.appendChild(td);
+    }
+    tools.appendChild(tr);
+  }
+
+  await loadGraphStructure(s.artifacts);
+  baseInit();
+  if (window.uiRefresh) window.uiRefresh();
+}
+
+async function pollLive() {
+  const body = document.getElementById('live-body');
+  const dot = document.getElementById('live-dot');
+  try {
+    const d = await (await fetch('/api/live')).json();
+    // visibility belongs to the view tabs; this poll only fills the
+    // body and drives the navbar dot
+    if (window.liveEnabled !== !!d.enabled) {
+      window.liveEnabled = !!d.enabled;
+      window.dispatchEvent(new Event('livestate'));
+    }
+    if (!d.enabled) {
+      dot.className = 'live-dot';
+      body.innerHTML = '<div class="muted">no live server configured; restart the dashboard with --vllm host:port</div>';
+      return;
+    }
+    if (d.error) {
+      dot.className = 'live-dot';
+      body.innerHTML = '<div class="muted">unreachable: ' + d.error + '</div>';
+      return;
+    }
+    dot.className = 'live-dot on';
+    body.innerHTML = '';
+    const cards = [
+      { label: 'requests running', value: d.running, unit: '', max: 0, note: '' },
+      { label: 'requests waiting', value: d.waiting, unit: '', max: 0, note: '' },
+      { label: 'KV cache usage', value: d.kvUsagePct, unit: '%', max: 100, note: '' },
+      { label: 'output rate (window)', value: d.genTokS, unit: 'tok/s', max: 0, note: '' },
+      { label: 'TTFT mean (window)', value: d.ttftMeanMs, unit: 'ms', max: 0, note: '' },
+      { label: 'TPOT mean (window)', value: d.tpotMeanMs, unit: 'ms', max: 0, note: '' },
+      { label: 'latency split (finished requests)', value: d.queueMeanS, unit: 's queued', max: 0, note: 'prefill ' + d.prefillMeanS + ' s, decode ' + d.decodeMeanS + ' s' },
+      { label: 'preemptions (window)', value: d.preemptions, unit: '', max: 0, note: d.preemptions > 0 ? 'KV pressure: raise --gpu-memory-utilization or lower --max-num-seqs' : 'no KV pressure' },
+      { label: 'requests in window', value: d.requests, unit: '', max: 0, note: '' },
+      { label: 'window', value: d.windowS, unit: 's', max: 0, note: '' },
+    ];
+    for (const m of cards) {
+      const card = metricCard(m);
+      if (m.label.startsWith('preemptions') && m.value > 0) {
+        card.style.borderColor = 'var(--bad)';
+        card.querySelector('.v').style.color = 'var(--bad)';
+      }
+      body.appendChild(card);
+    }
+  } catch (e) {
+    dot.className = 'live-dot';
+  }
+}
+
+// dashboard rows collapse like Grafana's: click the header to fold
+for (const h of document.querySelectorAll('.rowhead')) {
+  h.addEventListener('click', () => {
+    const closed = h.parentElement.classList.toggle('closed');
+    h.setAttribute('aria-expanded', String(!closed));
+  });
+}
+
+loadSummary();
+pollLive();
+setInterval(pollLive, 5000);
+</script>
+
+<script type="module">
+// app shell: Preact renders the main view tabs and the explorer
+// sidebar; the imperative renderers above keep owning the panel DOM
+import { html, render, useState, useEffect } from '/lib/preact-htm.mjs';
+
+const VIEWS = [
+  { id: 'run', label: 'This run' },
+  { id: 'baseline', label: 'Baseline' },
+  { id: 'live', label: 'Live server' },
+  { id: 'toolbox', label: 'Toolbox' },
+];
+const SECTIONS = { run: 'sec-run', baseline: 'sec-baseline', live: 'row-live', toolbox: 'sec-toolbox' };
+
+function applyView(v) {
+  window.currentView = v;
+  for (const [id, sec] of Object.entries(SECTIONS)) {
+    const el2 = document.getElementById(sec);
+    if (el2) el2.style.display = v === id ? '' : 'none';
+  }
+  window.dispatchEvent(new Event('viewchange'));
+}
+
+// both components track the current view through one window-level
+// source so a run click in the sidebar activates the run tab
+function useView() {
+  const [v, setV] = useState(window.currentView || 'run');
+  useEffect(() => {
+    const h = () => setV(window.currentView);
+    window.addEventListener('viewchange', h);
+    return () => window.removeEventListener('viewchange', h);
+  }, []);
+  return v;
+}
+
+function ViewTabs() {
+  const view = useView();
+  const [, bump] = useState(0);
+  useEffect(() => {
+    const h = () => bump(x => x + 1);
+    window.addEventListener('livestate', h);
+    return () => window.removeEventListener('livestate', h);
+  }, []);
+  return html`
+    <div class="tabs">
+      ${VIEWS.map(v => html`
+        <button class=${view === v.id ? 'on' : ''} onClick=${() => applyView(v.id)}>
+          ${v.label}${v.id === 'live' && !window.liveEnabled ? html`<span class="tag">off</span>` : ''}
+        </button>`)}
+    </div>
+  `;
+}
+
+function runKind(r) {
+  if (r.file) return 'graph';
+  if (r.arts.some(a => a.includes('.pt.trace.json'))) return 'torch';
+  return 'record';
+}
+
+function Sidebar() {
+  const view = useView();
+  const [tick, setTick] = useState(0);
+  const [pendingForce, setPendingForce] = useState(null);
+  const [busy, setBusy] = useState('');
+  const [err, setErr] = useState('');
+  const [open, setOpen] = useState({});
+
+  useEffect(() => {
+    window.uiRefresh = () => setTick(t => t + 1);
+    // the data loaders may have finished before this registration:
+    // re-read the globals once now, and again whenever they call back
+    setTick(t => t + 1);
+  }, []);
+
+  const runs = (typeof gsx2 !== 'undefined' && gsx2.names.length)
+    ? [...gsx2.names].sort(natCmp).reverse() : [];
+  const archives = (typeof summaryData !== 'undefined' && summaryData)
+    ? summaryData.artifacts.filter(a => a.endsWith('.kvlm') && !a.includes('/')) : [];
+
+  function pickRun(n) {
+    gsx2.sel = n;
+    if (gsx2.cmp === n) gsx2.cmp = null;
+    gsxShow();
+    applyView('run');
+  }
+  async function loadArchive(name) {
+    const force = pendingForce === name;
+    setBusy(name);
+    try {
+      const r = await fetch('/api/import?archive=' + encodeURIComponent(name) + (force ? '&force=1' : ''), { method: 'POST' });
+      const j = await r.json();
+      if (j.error) {
+        if (j.error.includes('already exists')) { setPendingForce(name); setBusy(''); return; }
+        setBusy(''); setErr(j.error); return;
+      }
+      location.reload();
+    } catch (e) { setBusy(''); setErr(String(e)); }
+  }
+
+  // the selected run starts expanded; the caret overrides either way
+  const isOpen = n => (n in open) ? open[n] : n === gsx2.sel;
+  function toggle(e, n) {
+    e.stopPropagation();
+    setOpen(o => ({ ...o, [n]: !isOpen(n) }));
+  }
+  const heavy = a => a.endsWith('.nsys-rep') || a.endsWith('.sqlite') || a.endsWith('.gz') || a.endsWith('.kvlm');
+
+  return html`
+    <div class="side-h">Runs</div>
+    ${runs.map(n => html`
+      <div class="side-item run ${view === 'run' && gsx2.sel === n ? 'on' : ''}" onClick=${() => pickRun(n)}>
+        <span class="rchev" onClick=${e => toggle(e, n)}>${isOpen(n) ? '▾' : '▸'}</span>
+        ${n}<span class="tag">${runKind(gsx2.runs[n])}</span>
+      </div>
+      ${isOpen(n) ? gsx2.runs[n].arts.map(a => html`
+        <a class="side-file" href=${'/artifacts/' + a} title=${a}
+           target=${heavy(a) ? null : '_blank'} download=${heavy(a) ? '' : null}>
+          ${a.slice(a.indexOf('/') + 1)}
+        </a>`) : ''}`)}
+    ${!runs.length ? html`<div class="side-note">no runs recorded</div>` : ''}
+    <div class="side-h">Archives (.kvlm)</div>
+    ${archives.map(a => html`
+      <div class="side-item run">
+        ${a}
+        <button class="side-act tag" onClick=${() => loadArchive(a)}>
+          ${busy === a ? 'loading...' : pendingForce === a ? 'overwrite?' : 'load'}
+        </button>
+      </div>`)}
+    ${!archives.length ? html`<div class="side-note">none in profile-output/; pack one with kvlm profile archive</div>` : ''}
+    ${err ? html`<div class="side-note" style="color:var(--red)">${err}</div>` : ''}
+  `;
+}
+
+applyView('run');
+render(html`<${ViewTabs} />`, document.getElementById('viewtabs'));
+render(html`<${Sidebar} />`, document.getElementById('sidebar'));
+</script>
+</body>
+</html>

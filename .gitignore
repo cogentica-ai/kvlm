@@ -1,0 +1,18 @@
+# build output
+/target
+
+# assistant session artifacts, not project source
+/.claude
+/.memsearch
+/2026-*-*.txt
+
+# collected profiling runs: measured data, hundreds of MB of captures;
+# they travel as .kvlm archives, not through git
+/profile-output
+/profile-output.bak*
+*.kvlm
+/qwen-code-export-*.md
+
+# personal sketches, not project files
+/drawing-1.svg
+/g1024.png
