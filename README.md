@@ -12,7 +12,7 @@ on the [goish](https://github.com/cogentica-ai/goish) runtime and the
 ## The loop
 
 ```
-kvlm up qwen3-32b --mode profile      # pod with vLLM under the profilers
+kvlm up qwen3.8-27b --mode profile    # pod with vLLM under the profilers
 kvlm tune --goal total@32             # collect, verdict, recommendation
 kvlm apply max-num-seqs=64            # restart with the change, a few minutes
 kvlm tune                             # measure the change against its parent
